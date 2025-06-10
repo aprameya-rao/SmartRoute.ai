@@ -7,3 +7,6 @@ or
 Geocoding: LocationIQ, Geoapify, or OpenStreetMap Nominatim(Converting the input data into usable format)
 
 Routing : Mapbox Directions API or HERE Routing API (basic) for segments (Initial Route calculation)
+
+To be done 
+
