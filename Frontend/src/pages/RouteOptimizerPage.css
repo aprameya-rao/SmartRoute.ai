@@ -1,0 +1,58 @@
+
+
+.route-optimizer-page {
+  padding: var(--spacing-xl) 0;
+}
+
+.route-optimizer-page h1 {
+  text-align: center;
+  color: var(--color-primary-green);
+  margin-bottom: var(--spacing-xl);
+}
+
+.optimizer-layout {
+  display: grid;
+  grid-template-columns: 1fr 2fr; 
+  gap: var(--spacing-xl);
+  align-items: start; 
+}
+
+.sidebar {
+  background-color: var(--color-white);
+  padding: var(--spacing-xl);
+  border-radius: var(--border-radius);
+  box-shadow: var(--box-shadow-light);
+  display: flex;
+  flex-direction: column;
+  gap: var(--spacing-xl); 
+}
+
+.map-section {
+  background-color: var(--color-white);
+  border-radius: var(--border-radius);
+  box-shadow: var(--box-shadow-light);
+  min-height: 600px; 
+  display: flex; 
+  align-items: center;
+  justify-content: center;
+  overflow: hidden;
+}
+
+.error-message {
+  color: #D32F2F;
+  background-color: #FFEBEE;
+  border: 1px solid #EF9A9A;
+  padding: var(--spacing-small);
+  border-radius: var(--border-radius);
+  margin-top: var(--spacing-medium);
+}
+
+
+@media (max-width: 992px) {
+  .optimizer-layout {
+    grid-template-columns: 1fr;
+  }
+  .map-section {
+    min-height: 400px; 
+  }
+}

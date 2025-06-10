@@ -1,0 +1,63 @@
+.battery-disposal-page {
+  padding: var(--spacing-xl) 0;
+  background-color: var(--color-white);
+  border-radius: var(--border-radius);
+  box-shadow: var(--box-shadow-light);
+  padding: var(--spacing-xl);
+}
+
+.battery-disposal-page h1 {
+  text-align: center;
+  color: var(--color-primary-green);
+  margin-bottom: var(--spacing-xl);
+}
+
+.battery-disposal-page h2 {
+  color: var(--color-primary-blue);
+  margin-top: var(--spacing-xl);
+  margin-bottom: var(--spacing-medium);
+  border-bottom: 2px solid var(--color-accent-light-blue);
+  padding-bottom: var(--spacing-small);
+}
+
+.battery-disposal-page section {
+  margin-bottom: var(--spacing-xl);
+}
+
+.battery-disposal-page ul,
+.battery-disposal-page ol {
+  margin-left: var(--spacing-medium);
+  list-style-type: disc;
+  color: var(--color-text-dark);
+}
+
+.battery-disposal-page ol {
+  list-style-type: decimal;
+}
+
+.battery-disposal-page li {
+  margin-bottom: var(--spacing-small);
+}
+
+.battery-disposal-page dt {
+  font-weight: bold;
+  color: var(--color-dark-gray);
+  margin-top: var(--spacing-medium);
+}
+
+.battery-disposal-page dd {
+  margin-left: var(--spacing-medium);
+  margin-bottom: var(--spacing-small);
+}
+
+
+.battery-disposal-page strong {
+  color: var(--color-primary-green);
+}
+
+
+@media (max-width: 768px) {
+  .battery-disposal-page {
+    padding: var(--spacing-medium);
+  }
+}

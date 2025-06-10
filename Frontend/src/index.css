@@ -1,0 +1,79 @@
+/* src/index.css */
+
+:root {
+  /* Primary Environmental Palette */
+  --color-primary-green: #4CAF50; /* A fresh green */
+  --color-primary-blue: #2196F3; /* A calming blue */
+  --color-accent-light-green: #8BC34A; /* Lighter accent green */
+  --color-accent-light-blue: #90CAF9; /* Lighter accent blue */
+
+  /* Neutral/Light Palette */
+  --color-white: #FFFFFF;
+  --color-light-gray: #F0F4F8; /* Very light background */
+  --color-medium-gray: #CFD8DC; /* For borders, subtle shadows */
+  --color-dark-gray: #607D8B; /* For text, subtle contrasts */
+  --color-text-dark: #333333; /* Main body text */
+  --color-text-light: #FFFFFF;
+
+  /* Spacing */
+  --spacing-small: 8px;
+  --spacing-medium: 16px;
+  --spacing-large: 24px;
+  --spacing-xl: 32px;
+
+  /* Borders & Shadows */
+  --border-radius: 8px;
+  --box-shadow-light: 0 4px 12px rgba(0, 0, 0, 0.08); /* Soft shadow */
+}
+
+body {
+  margin: 0;
+  font-family: 'Segoe UI', 'Roboto', 'Oxygen',
+    'Ubuntu', 'Cantarell', 'Fira Sans', 'Droid Sans', 'Helvetica Neue',
+    sans-serif;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+  background-color: var(--color-light-gray); /* Light, airy background */
+  color: var(--color-text-dark);
+  line-height: 1.6;
+}
+
+code {
+  font-family: source-code-pro, Menlo, Monaco, Consolas, 'Courier New',
+    monospace;
+}
+
+/* Basic Reset for elements */
+h1, h2, h3, h4, h5, h6 {
+  color: var(--color-dark-gray); /* Slightly darker for headings */
+  margin-top: 0;
+  margin-bottom: var(--spacing-medium);
+}
+
+p {
+  margin-bottom: var(--spacing-small);
+}
+
+ul {
+  list-style: none;
+  padding: 0;
+  margin: 0;
+}
+
+a {
+  color: var(--color-primary-blue);
+  text-decoration: none;
+}
+
+a:hover {
+  text-decoration: underline;
+}
+
+button {
+  padding: var(--spacing-small) var(--spacing-medium);
+  border: none;
+  border-radius: var(--border-radius);
+  cursor: pointer;
+  font-size: 1rem;
+  transition: background-color 0.2s ease;
+}

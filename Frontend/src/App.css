@@ -1,0 +1,24 @@
+/* src/App.css */
+
+.app-container {
+  display: flex;
+  flex-direction: column;
+  min-height: 100vh; /* Ensures footer is at bottom */
+  background-color: var(--color-light-gray);
+}
+
+.main-content {
+  flex-grow: 1; /* Takes up remaining space */
+  padding: var(--spacing-xl);
+  max-width: 1200px; /* Max width for content */
+  margin: 0 auto; /* Center content */
+  width: 100%; /* Full width within max-width */
+  box-sizing: border-box; /* Include padding in element's total width and height */
+}
+
+/* Responsive adjustments */
+@media (max-width: 768px) {
+  .main-content {
+    padding: var(--spacing-medium);
+  }
+}
