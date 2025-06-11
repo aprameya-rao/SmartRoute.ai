@@ -1,29 +1,24 @@
-/* src/index.css */
-
 :root {
-  /* Primary Environmental Palette */
-  --color-primary-green: #4CAF50; /* A fresh green */
-  --color-primary-blue: #2196F3; /* A calming blue */
-  --color-accent-light-green: #8BC34A; /* Lighter accent green */
-  --color-accent-light-blue: #90CAF9; /* Lighter accent blue */
+  --color-primary-green: #4CAF50; 
+  --color-primary-blue: #2196F3; 
+  --color-accent-light-green: #8BC34A; 
+  --color-accent-light-blue: #90CAF9; 
 
-  /* Neutral/Light Palette */
   --color-white: #FFFFFF;
-  --color-light-gray: #F0F4F8; /* Very light background */
-  --color-medium-gray: #CFD8DC; /* For borders, subtle shadows */
-  --color-dark-gray: #607D8B; /* For text, subtle contrasts */
-  --color-text-dark: #333333; /* Main body text */
+   --color-light-gray: #F0F4F8; /* this is the main background color specifier */
+  --color-medium-gray: #CFD8DC; 
+  --color-dark-gray: #607D8B; 
+  --color-text-dark: #333333; 
   --color-text-light: #FFFFFF;
 
-  /* Spacing */
   --spacing-small: 8px;
   --spacing-medium: 16px;
   --spacing-large: 24px;
   --spacing-xl: 32px;
 
-  /* Borders & Shadows */
+
   --border-radius: 8px;
-  --box-shadow-light: 0 4px 12px rgba(0, 0, 0, 0.08); /* Soft shadow */
+  --box-shadow-light: 0 4px 12px rgba(0, 0, 0, 0.08); 
 }
 
 body {
@@ -31,9 +26,10 @@ body {
   font-family: 'Segoe UI', 'Roboto', 'Oxygen',
     'Ubuntu', 'Cantarell', 'Fira Sans', 'Droid Sans', 'Helvetica Neue',
     sans-serif;
+  /* background-image: url(); add the background image here */
   -webkit-font-smoothing: antialiased;
   -moz-osx-font-smoothing: grayscale;
-  background-color: var(--color-light-gray); /* Light, airy background */
+  background-color: var(--color-light-gray); 
   color: var(--color-text-dark);
   line-height: 1.6;
 }
@@ -43,9 +39,9 @@ code {
     monospace;
 }
 
-/* Basic Reset for elements */
+
 h1, h2, h3, h4, h5, h6 {
-  color: var(--color-dark-gray); /* Slightly darker for headings */
+  color: var(--color-dark-gray); 
   margin-top: 0;
   margin-bottom: var(--spacing-medium);
 }
