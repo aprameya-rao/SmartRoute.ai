@@ -2,6 +2,10 @@
 
 .route-optimizer-page {
   padding: var(--spacing-xl) 0;
+  background-color: var(--color-white); 
+  border-radius: var(--border-radius);
+  box-shadow: var(--box-shadow-light);
+  padding: var(--spacing-xl);
 }
 
 .route-optimizer-page h1 {

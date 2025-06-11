@@ -5,6 +5,7 @@ import Footer from './components/Footer.jsx';
 import RouteOptimizerPage from './pages/RouteOptimizerPage.jsx'; 
 import BatteryDisposalPage from './pages/BatteryDisposalPage.jsx'; 
 import './App.css'; 
+import HomePage from './pages/HomePage.jsx';
 
 function App() {
   return (
@@ -14,7 +15,8 @@ function App() {
 
         <main className="main-content">
           <Routes>
-            <Route path="/" element={<RouteOptimizerPage />} />
+            <Route path="/" element={<HomePage />} />
+            <Route path="/route-optimizer" element={<RouteOptimizerPage />} />
             <Route path="/battery-disposal" element={<BatteryDisposalPage />} />
           </Routes>
         </main>

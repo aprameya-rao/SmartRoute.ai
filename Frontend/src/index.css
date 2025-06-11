@@ -5,7 +5,7 @@
   --color-accent-light-blue: #90CAF9; 
 
   --color-white: #FFFFFF;
-   --color-light-gray: #F0F4F8; /* this is the main background color specifier */
+   /* --color-light-gray: #F0F4F8; this is the main background color specifier */
   --color-medium-gray: #CFD8DC; 
   --color-dark-gray: #607D8B; 
   --color-text-dark: #333333; 
@@ -26,7 +26,11 @@ body {
   font-family: 'Segoe UI', 'Roboto', 'Oxygen',
     'Ubuntu', 'Cantarell', 'Fira Sans', 'Droid Sans', 'Helvetica Neue',
     sans-serif;
-  /* background-image: url(); add the background image here */
+  background-image: url("Background.png"); 
+  background-repeat: no-repeat; 
+  background-size: cover;
+  background-position: center center;
+  background-attachment: fixed;
   -webkit-font-smoothing: antialiased;
   -moz-osx-font-smoothing: grayscale;
   background-color: var(--color-light-gray); 

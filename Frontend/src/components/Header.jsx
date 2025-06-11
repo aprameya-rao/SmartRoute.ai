@@ -10,7 +10,7 @@ function Header() {
       </div>
       <nav className="nav-links">
         <ul>
-          <li><Link to="/">Route Optimizer</Link></li>
+          <li><Link to="/route-optimizer">Route Optimizer</Link></li>
           <li><Link to="/battery-disposal">Battery Disposal</Link></li>
         </ul>
       </nav>
