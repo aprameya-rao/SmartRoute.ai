@@ -17,7 +17,7 @@ function RouteForm({ onSubmit, loading }) {
       currentCharge: parseFloat(currentCharge),
       startLocation,
       destination,
-      preferredCharger,
+      preferredCharger: preferredCharger === 'fast' ? 'fast' : 'standard', 
     });
   };
 
@@ -87,9 +87,8 @@ function RouteForm({ onSubmit, loading }) {
           value={preferredCharger}
           onChange={(e) => setPreferredCharger(e.target.value)}
         >
-          <option value="any">Any</option>
-          <option value="level2">Level 2 AC</option>
-          <option value="dc_fast">DC Fast Charge</option>
+          <option value="standard">Standard (Any Charger)</option>
+          <option value="fast">Fast Charge</option>
         </select>
       </div>
       <button type="submit" disabled={loading}>
