@@ -1,97 +1,118 @@
-# ev-route-optimizer-backend/services/ev_optimizer.py
 import math
-from typing import List, Dict, Any, Optional, Tuple
-from geopy.distance import geodesic # For accurate distance calculation between two lat/lon points
+import asyncio
+from typing import List, Tuple, Dict, Any, Optional
 
-from api.v1.models.route_request import RouteRequest
-from api.v1.models.route_response import Coordinate, RouteSegment, ChargingStation, RouteSummary, RouteResponse
+from api.v1.models.route_response import Coordinate, RouteResponse, RouteStep, ChargingStation, RouteRequest, RouteSummary, RouteSegment
+from services.routing import get_detailed_route_from_graphhopper, parse_graphhopper_response
+from services.charging_stations import find_charging_stations # Corrected import name
 from services.geocoding import get_coordinates
-from services.routing import get_detailed_route_from_ors, parse_ors_geometry_to_coords
-from services.charging_stations import find_charging_stations
 
-# --- Simplified EV Data (In a real application, this would come from a database) ---
+MIN_CHARGE_AT_DESTINATION_PERCENT = 20
+CHARGE_THRESHOLD_PERCENT = 15
+TARGET_CHARGE_PERCENT_AT_STOP = 80
+MIN_CHARGER_POWER_KW_FAST = 50
+MIN_CHARGER_POWER_KW_ANY = 22
+
+# MANUAL DATABASE: EV_MODELS
 EV_MODELS = {
-    "Tesla Model 3 Long Range": {
-        "battery_capacity_kwh": 75.0, # Total usable battery capacity
-        "consumption_wh_km": 150,     # Average Watt-hours per kilometer
-        "usable_soc_min": 10,         # Minimum SoC to never drop below (buffer)
-        "usable_soc_max": 90,         # Max SoC to charge to (avoiding very slow top 10%)
-        # Simplified charging power profile (kW) based on SoC.
-        # Real-world charging curves are more complex.
+    "tata nexon ev": {
+        "battery_capacity_kwh": 30.2,
+        "consumption_wh_km": 156,
+        "usable_soc_min": 10,
+        "usable_soc_max": 90,
         "charging_profile_kw": [
-            {"soc_percent": 0, "power_kw": 250},   # 0-50% charge at 250 kW
-            {"soc_percent": 50, "power_kw": 150},  # 50-80% charge at 150 kW
-            {"soc_percent": 80, "power_kw": 50},   # 80-90% charge at 50 kW
-            {"soc_percent": 90, "power_kw": 20},   # Above 90% is very slow
+            {"soc_percent": 0, "power_kw": 25},
+            {"soc_percent": 80, "power_kw": 15},
+            {"soc_percent": 90, "power_kw": 8},
         ]
     },
-    "Nissan Leaf S": {
-        "battery_capacity_kwh": 40.0,
-        "consumption_wh_km": 180,
+    "tesla model 3 long range": {
+        "battery_capacity_kwh": 75.0,
+        "consumption_wh_km": 150,
+        "usable_soc_min": 10,
+        "usable_soc_max": 90,
+        "charging_profile_kw": [
+            {"soc_percent": 0, "power_kw": 250},
+            {"soc_percent": 50, "power_kw": 150},
+            {"soc_percent": 80, "power_kw": 50},
+            {"soc_percent": 90, "power_kw": 20},
+        ]
+    },
+    "hyundai kona electric": {
+        "battery_capacity_kwh": 39.2,
+        "consumption_wh_km": 140, # Example consumption
         "usable_soc_min": 10,
         "usable_soc_max": 90,
         "charging_profile_kw": [
             {"soc_percent": 0, "power_kw": 50},
-            {"soc_percent": 80, "power_kw": 20},
+            {"soc_percent": 80, "power_kw": 25},
             {"soc_percent": 90, "power_kw": 10},
+        ]
+    },
+    "mg zs ev": {
+        "battery_capacity_kwh": 50.3,
+        "consumption_wh_km": 160, # Example consumption
+        "usable_soc_min": 10,
+        "usable_soc_max": 90,
+        "charging_profile_kw": [
+            {"soc_percent": 0, "power_kw": 80},
+            {"soc_percent": 80, "power_kw": 30},
+            {"soc_percent": 90, "power_kw": 15},
         ]
     }
 }
 
-# --- Configuration for Optimization Strategy ---
-# How often to simulate SoC check along the route polyline (smaller = more granular, slower)
-ROUTE_SIMULATION_SEGMENT_LENGTH_KM = 0.5 # Check SoC every 500 meters
 
-# Minimum SoC percentage required upon arrival at the final destination
-MIN_CHARGE_AT_DESTINATION_PERCENT = 20
-
-# If SoC drops below this percentage during driving, look for a charger
-CHARGE_THRESHOLD_PERCENT = 15
-
-# Target SoC percentage to charge to at a charging stop (avoids overcharging/slow top-up)
-TARGET_CHARGE_PERCENT_AT_STOP = 80
-
-# Minimum power of a charger to consider for a stop (kW)
-MIN_CHARGER_POWER_KW = 50 
+class UnfeasibleRouteError(Exception):
+    """Custom exception raised when a route cannot be planned due to insufficient charging options."""
+    pass
 
 def get_charging_power_for_soc(ev_type_data: Dict[str, Any], current_soc_percent: float) -> float:
     """
-    Estimates the EV's maximum charging power based on its SoC and predefined charging profile.
-    This simulates the tapering effect where charging slows down as battery fills.
+    Determines the charging power (kW) an EV can receive at a given State of Charge (SoC).
     """
     profile = ev_type_data["charging_profile_kw"]
-    # Find the appropriate power segment in the profile
     for i in range(len(profile) - 1):
         if current_soc_percent >= profile[i]["soc_percent"] and current_soc_percent < profile[i+1]["soc_percent"]:
             return profile[i]["power_kw"]
-
-    # If we are at or above the last defined SoC point
+    
     if current_soc_percent >= profile[-1]["soc_percent"]:
         return profile[-1]["power_kw"]
+    
+    return 0.0
 
-    return 0.0 # Should not happen if profile covers 0-100 adequately
+def calculate_consumption_wh_km_from_range(battery_capacity_kwh: float, range_km: float) -> float:
+    """
+    Calculates the energy consumption rate (Wh/km) of an EV based on its battery capacity and estimated range.
+    """
+    if range_km <= 0:
+        raise ValueError("Range on full charge must be a positive value.")
+    return (battery_capacity_kwh * 1000) / range_km
 
-async def optimize_ev_route(request: RouteRequest) -> RouteResponse:
+
+async def plan_ev_route(request: RouteRequest) -> RouteResponse:
     """
-    Main function to optimize the EV route, calculate battery consumption,
-    and insert necessary charging stops.
+    Plans an optimized EV route, including identifying necessary charging stops.
     """
-    # 0. Retrieve EV Model Data
-    ev_info = EV_MODELS.get(request.ev_type)
+    ev_key = request.ev_type.lower().strip()
+    ev_info = EV_MODELS.get(ev_key)
     if not ev_info:
-        raise ValueError(f"EV type '{request.ev_type}' not found in backend EV models.")
+        raise ValueError(f"EV type '{request.ev_type}' not found in database. Cannot determine battery capacity or charging profile.")
 
     battery_capacity_kwh = ev_info["battery_capacity_kwh"]
-    consumption_wh_km = ev_info["consumption_wh_km"]
+    consumption_wh_km = calculate_consumption_wh_km_from_range(battery_capacity_kwh, request.range_full_charge)
+    
     usable_soc_min = ev_info["usable_soc_min"]
     usable_soc_max = ev_info["usable_soc_max"]
-
-    # Adjust thresholds based on usable range
+    
     charge_threshold_for_ev = max(CHARGE_THRESHOLD_PERCENT, usable_soc_min)
     target_charge_for_ev = min(TARGET_CHARGE_PERCENT_AT_STOP, usable_soc_max)
     min_charge_at_destination_for_ev = max(MIN_CHARGE_AT_DESTINATION_PERCENT, usable_soc_min)
+    
+    charging_preference = getattr(request, 'charging_preference', 'standard').lower()
+    min_charger_power = MIN_CHARGER_POWER_KW_FAST if charging_preference == 'fast' else MIN_CHARGER_POWER_KW_ANY
 
-    # 1. Geocode Start and End Locations
+    # Geocode start and end locations
     start_coord = await get_coordinates(request.start_location)
     end_coord = await get_coordinates(request.end_location)
 
@@ -100,205 +121,208 @@ async def optimize_ev_route(request: RouteRequest) -> RouteResponse:
     if not end_coord:
         raise ValueError(f"Could not geocode end location: {request.end_location}")
 
-    # 2. Get Detailed Route from ORS
-    # We request a route between start and end. Waypoints are not integrated into this single ORS call
-    # for simplicity of SoC simulation, but could be added for more complex multi-leg routing.
-    ors_raw_route = await get_detailed_route_from_ors(start_coord, end_coord)
-    if not ors_raw_route or not ors_raw_route.get('routes'):
-        raise RuntimeError("Could not retrieve detailed route from OpenRouteService. Check API key or route validity.")
-
-    ors_route_data = ors_raw_route['routes'][0]
-    full_route_geometry = parse_ors_geometry_to_coords(ors_route_data['geometry']['coordinates'])
-
-    # --- Route Simulation and Charging Stop Insertion Logic ---
-    current_soc_percent = float(request.current_charge_percent)
-    total_route_segments: List[RouteSegment] = [] # Final list of segments (driving + charging)
-    total_driving_duration_minutes = 0.0
-    total_charging_duration_minutes = 0.0
-    total_distance_covered_km = 0.0
-    total_energy_consumed_kwh = 0.0 # Net consumption (driving energy - charged energy)
-    charging_stops_count = 0
-
-    # Current point in the route simulation. Starts at the true start_coord.
+    # Initialize simulation variables
     current_sim_coord = start_coord
+    current_soc_percent = float(request.current_charge_percent)
+    
+    total_optimized_distance_km = 0.0
+    total_optimized_duration_s = 0.0 # Total driving and charging duration in seconds
+    total_charging_duration_minutes = 0.0
+    total_energy_consumed_kwh = 0.0 # Tracks net energy consumed (driving - charging)
 
-    # Iterate through the ORS polyline to simulate the trip in small segments
-    # This allows for continuous SoC tracking and dynamic charging decisions.
-    for i in range(len(full_route_geometry) - 1):
-        next_point_on_polyline = full_route_geometry[i+1]
+    all_route_geometry: List[Coordinate] = []
+    all_route_segments_parsed: List[RouteStep] = [] # Use RouteStep for consistency with API models
+    charging_locations: List[ChargingStation] = []
+    
+    # Loop to simulate journey and add charging stops
+    max_iterations = 10 # Safety break for infinite loops
+    current_iteration = 0
 
-        # Calculate distance for this very small polyline segment
-        segment_distance_km = geodesic(
-            (current_sim_coord.lat, current_sim_coord.lon),
-            (next_point_on_polyline.lat, next_point_on_polyline.lon)
-        ).km
+    while current_sim_coord != end_coord and current_iteration < max_iterations:
+        current_iteration += 1
+        
+        # 1. Get route for the current leg (from current_sim_coord to final destination)
+        # This leg is used to evaluate if a charge is needed BEFORE driving it.
+        gh_response_current_leg = await get_detailed_route_from_graphhopper(current_sim_coord, end_coord)
+        current_leg_parsed = parse_graphhopper_response(gh_response_current_leg)
 
-        if segment_distance_km < 0.01: # Skip very tiny or zero-length segments
-            current_sim_coord = next_point_on_polyline
-            continue 
+        if not current_leg_parsed or not current_leg_parsed.get('route_geometry'):
+            raise RuntimeError(f"Could not retrieve route for leg from {current_sim_coord.lat:.4f},{current_sim_coord.lon:.4f} to destination.")
 
-        # Estimate duration for this small segment (very rough: assume average speed ~60km/h)
-        # ORS usually provides step-by-step durations, but for micro-segments, a simple speed assumption is common.
-        segment_duration_minutes = (segment_distance_km / 60.0) * 60.0 # Distance / speed (km/min)
-
-        # Calculate energy consumption for this small segment
-        energy_consumed_kwh_this_segment = (segment_distance_km * consumption_wh_km) / 1000.0
-
-        # Record SoC *before* consumption for this segment
-        soc_before_segment = current_soc_percent
-
-        # Update SoC after consumption
-        current_soc_percent -= (energy_consumed_kwh_this_segment / battery_capacity_kwh) * 100.0
-        total_energy_consumed_kwh += energy_consumed_kwh_this_segment
-
-        # Add to total driving duration and distance
-        total_driving_duration_minutes += segment_duration_minutes
-        total_distance_covered_km += segment_distance_km
-
-        # Create a driving segment for the response
-        driving_segment_for_response = RouteSegment(
-            type="driving",
-            start_coord=current_sim_coord,
-            end_coord=next_point_on_polyline,
-            distance_km=segment_distance_km,
-            duration_minutes=segment_duration_minutes,
-            start_soc_percent=soc_before_segment,
-            end_soc_percent=current_soc_percent,
-            energy_consumption_kwh=energy_consumed_kwh_this_segment
-        )
-        total_route_segments.append(driving_segment_for_response)
-
-        current_sim_coord = next_point_on_polyline # Move to the end of the current micro-segment
-
-        # --- Charging Decision Logic ---
-        # Check if charging is needed:
-        # 1. If current SoC drops below the safe threshold, OR
-        # 2. If it's near the end of the journey and SoC will be insufficient to reach the destination
-        is_last_point_on_polyline = (i == len(full_route_geometry) - 2) 
-
-        # Calculate estimated remaining distance from current point to destination
-        # This is a simplification; a more accurate model would use ORS for remaining segments.
-        # For this example, we assume the rest of the polyline is the remaining route.
-        remaining_distance_to_end_polyline_km = 0.0
-        for j in range(i + 1, len(full_route_geometry) - 1):
-             remaining_distance_to_end_polyline_km += geodesic(
-                (full_route_geometry[j].lat, full_route_geometry[j].lon),
-                (full_route_geometry[j+1].lat, full_route_geometry[j+1].lon)
-            ).km
-
-        # Calculate required SoC to reach destination (assuming linear consumption)
-        kwh_needed_to_destination = (remaining_distance_to_end_polyline_km * consumption_wh_km) / 1000.0
-        soc_needed_to_destination = (kwh_needed_to_destination / battery_capacity_kwh) * 100.0
-
+        distance_to_destination_this_leg = current_leg_parsed['total_distance_km']
+        
+        # Calculate energy needed to reach destination from current point with buffer
+        kwh_needed_to_destination_buffered = (distance_to_destination_this_leg * consumption_wh_km) / 1000.0
+        # Convert needed KWh to SOC percentage
+        soc_needed_to_destination_buffered = (kwh_needed_to_destination_buffered / battery_capacity_kwh) * 100.0
+        
+        # Check if a charge is needed for this leg
         charge_needed = False
         if current_soc_percent <= charge_threshold_for_ev:
-            # print(f"DEBUG: SoC ({current_soc_percent:.1f}%) <= threshold ({charge_threshold_for_ev:.1f}%)")
             charge_needed = True
-        elif is_last_point_on_polyline and current_soc_percent < min_charge_at_destination_for_ev:
-            # print(f"DEBUG: Last point and SoC ({current_soc_percent:.1f}%) < min arrival ({min_charge_at_destination_for_ev:.1f}%)")
+            print(f"Charge needed: SOC {current_soc_percent:.1f}% <= Threshold {charge_threshold_for_ev}%.")
+        elif (current_soc_percent - soc_needed_to_destination_buffered) < min_charge_at_destination_for_ev:
             charge_needed = True
-        elif current_soc_percent - soc_needed_to_destination < min_charge_at_destination_for_ev:
-            # print(f"DEBUG: Not enough range (SoC {current_soc_percent:.1f}%) to arrive with {min_charge_at_destination_for_ev:.1f}%")
+            print(f"Charge needed: SOC {current_soc_percent:.1f}% - Needed {soc_needed_to_destination_buffered:.1f}% ({current_soc_percent - soc_needed_to_destination_buffered:.1f}%) < Min Dest {min_charge_at_destination_for_ev}%.")
+        elif current_soc_percent < (soc_needed_to_destination_buffered + (battery_capacity_kwh * 0.1 / battery_capacity_kwh * 100)): # 10% buffer
             charge_needed = True
+            print(f"Charge needed: SOC {current_soc_percent:.1f}% insufficient for destination with 10% buffer.")
 
+        # --- Handle Charging Stop if Needed ---
         if charge_needed:
-            # Find charging stations near the current location
-            print(f"SoC low ({current_soc_percent:.1f}%) at {current_sim_coord.lat:.4f},{current_sim_coord.lon:.4f}. Searching for chargers...")
-            nearby_chargers = await find_charging_stations(
+            print(f"Attempting to find charging station near {current_sim_coord.lat:.4f}, {current_sim_coord.lon:.4f}...")
+            nearby_chargers = await find_charging_stations( # Corrected function call
                 latitude=current_sim_coord.lat,
                 longitude=current_sim_coord.lon,
-                distance_km=15, # Search within 15 km radius
-                max_results=5,
-                min_power_kw=MIN_CHARGER_POWER_KW # Only consider faster chargers
+                distance_km=25, # Search radius for chargers
+                max_results=10,
+                min_power_kw=min_charger_power
             )
 
-            suitable_charger: Optional[ChargingStation] = None
-            # Prioritize faster chargers
-            nearby_chargers.sort(key=lambda x: x.power_kw if x.power_kw else 0, reverse=True)
+            # Sort by distance and then by power (higher power preferred)
+            nearby_chargers.sort(key=lambda x: (x.distance_km if x.distance_km is not None else float('inf'), -(x.power_kw if x.power_kw is not None else 0)))
 
+            suitable_charger: Optional[ChargingStation] = None
+            # Find the best suitable charger
             for charger in nearby_chargers:
-                # You could add more sophisticated selection logic here (e.g., connector type, network)
-                if charger.power_kw and charger.power_kw >= MIN_CHARGER_POWER_KW: 
+                if charger.power_kw and charger.power_kw >= min_charger_power:
                     suitable_charger = charger
                     break
-
-            if suitable_charger:
-                print(f"Found suitable charger: {suitable_charger.name} ({suitable_charger.power_kw}kW)")
-                charging_stops_count += 1
-
-                # Calculate charge amount needed
-                # Charge up to TARGET_CHARGE_PERCENT_AT_STOP (or usable_soc_max if lower)
-                target_soc_kwh = (target_charge_for_ev / 100.0) * battery_capacity_kwh
-                current_soc_kwh = (current_soc_percent / 100.0) * battery_capacity_kwh
-
-                charge_needed_kwh = target_soc_kwh - current_soc_kwh
-
-                if charge_needed_kwh < 0.1: # Already sufficiently charged
-                    print("Already sufficiently charged at this point, skipping stop.")
-                    continue
-
-                # Calculate charging time based on EV's charging profile and station's power
-                # The EV's charging power (tapering) is often the limiting factor at higher SoCs
-                # The station's power is the limiting factor if EV can charge faster than station supplies
-                ev_max_power_at_current_soc = get_charging_power_for_soc(ev_info, current_soc_percent)
-                effective_charging_power_kw = min(ev_max_power_at_current_soc, suitable_charger.power_kw or 0.0)
-
-                if effective_charging_power_kw <= 0:
-                    print(f"Warning: No effective charging power for {suitable_charger.name}. Skipping stop.")
-                    continue
-
-                estimated_charge_time_hours = charge_needed_kwh / effective_charging_power_kw
-                estimated_charge_time_minutes = round(estimated_charge_time_hours * 60)
-
-                # Update SoC after charging
-                current_soc_before_charge_stop = current_soc_percent
-                current_soc_percent = (target_soc_kwh / battery_capacity_kwh) * 100.0
-                total_charging_duration_minutes += estimated_charge_time_minutes
-                total_energy_consumed_kwh -= charge_needed_kwh # Charging adds energy back, so it's a "negative consumption"
-
-                # Add charging stop segment to the route
-                charging_stop_segment = RouteSegment(
-                    type="charging_stop",
-                    start_coord=current_sim_coord,
-                    end_coord=current_sim_coord, # End at same location as it's a stop
-                    distance_km=0.0,
-                    duration_minutes=float(estimated_charge_time_minutes),
-                    station_id=suitable_charger.id,
-                    station_name=suitable_charger.name,
-                    charge_added_kwh=charge_needed_kwh,
-                    charge_added_percent=(charge_needed_kwh / battery_capacity_kwh) * 100.0,
-                    start_soc_percent=current_soc_before_charge_stop, # SoC before charging
-                    end_soc_percent=current_soc_percent # SoC after charging
+            
+            if not suitable_charger:
+                raise UnfeasibleRouteError(
+                    f"No suitable charging station found near {current_sim_coord.lat:.4f}, "
+                    f"{current_sim_coord.lon:.4f} with min power {min_charger_power}kW. "
+                    f"Current SOC: {current_soc_percent:.1f}%. Route cannot be completed."
                 )
-                total_route_segments.append(charging_stop_segment)
+            
+            # --- Route to Charging Station ---
+            print(f"Routing to charging station: {suitable_charger.title} at {suitable_charger.coordinates.lat:.4f}, {suitable_charger.coordinates.lon:.4f}")
+            gh_response_to_charger = await get_detailed_route_from_graphhopper(current_sim_coord, suitable_charger.coordinates)
+            to_charger_parsed = parse_graphhopper_response(gh_response_to_charger)
 
-                # Update the suitable_charger object with recommended time/added for response
-                suitable_charger.recommended_charge_minutes = estimated_charge_time_minutes
-                suitable_charger.estimated_charge_added_kwh = charge_needed_kwh
+            if not to_charger_parsed or not to_charger_parsed.get('route_geometry'):
+                raise RuntimeError(f"Could not route to charging station {suitable_charger.title}.")
+
+            # Simulate driving to charger
+            drive_to_charger_distance_km = to_charger_parsed['total_distance_km']
+            drive_to_charger_duration_s = to_charger_parsed['total_duration_s']
+            energy_consumed_to_charger_kwh = (drive_to_charger_distance_km * consumption_wh_km) / 1000.0
+
+            soc_before_driving_to_charger = current_soc_percent
+            current_soc_percent -= (energy_consumed_to_charger_kwh / battery_capacity_kwh) * 100.0
+            total_energy_consumed_kwh += energy_consumed_to_charger_kwh
+
+            # Add this driving segment to overall route
+            # Ensure not to duplicate last point if it's the start of the new segment
+            if all_route_geometry and to_charger_parsed['route_geometry'] and all_route_geometry[-1] == to_charger_parsed['route_geometry'][0]:
+                all_route_geometry.extend(to_charger_parsed['route_geometry'][1:])
             else:
-                print(f"No suitable charger found near {current_sim_coord.lat:.4f},{current_sim_coord.lon:.4f}. Continuing with low SoC!")
-                # In a real app, you might stop here, raise an error, or issue a strong warning to the user.
+                all_route_geometry.extend(to_charger_parsed['route_geometry'])
+            all_route_segments_parsed.extend(to_charger_parsed['route_segments'])
+            
+            total_optimized_distance_km += drive_to_charger_distance_km
+            total_optimized_duration_s += drive_to_charger_duration_s
 
-    # --- Final Summary Calculation ---
-    # Ensure final SoC is within bounds [0, 100]
-    final_charge_percent = max(0, min(100, int(current_soc_percent))) 
+            current_sim_coord = suitable_charger.coordinates # Now at the charger location
 
-    # Calculate total duration including driving and charging
-    total_duration_minutes = total_driving_duration_minutes + total_charging_duration_minutes
+            # --- Simulate Charging at Station ---
+            target_soc_kwh = (target_charge_for_ev / 100.0) * battery_capacity_kwh
+            current_soc_kwh = (current_soc_percent / 100.0) * battery_capacity_kwh
+            charge_needed_kwh = target_soc_kwh - current_soc_kwh
+
+            if charge_needed_kwh < 0.1: # Don't charge if almost full
+                charge_needed_kwh = 0.0 # Set to 0 if negligible
+                print(f"Negligible charge needed ({charge_needed_kwh:.2f} kWh). Skipping charge.")
+
+            if charge_needed_kwh > 0:
+                ev_max_power = get_charging_power_for_soc(ev_info, current_soc_percent)
+                effective_charger_power = suitable_charger.power_kw if suitable_charger.power_kw else 0.0
+                effective_charging_rate_kw = min(ev_max_power, effective_charger_power)
+
+                if effective_charging_rate_kw == 0:
+                    raise UnfeasibleRouteError(f"Effective charging power at {suitable_charger.title} is 0kW. Cannot charge.")
+                
+                charge_time_hours = charge_needed_kwh / effective_charging_rate_kw
+                charge_time_minutes = round(charge_time_hours * 60)
+
+                current_soc_before_charge = current_soc_percent
+                current_soc_percent = (target_soc_kwh / battery_capacity_kwh) * 100.0
+                total_charging_duration_minutes += charge_time_minutes
+                total_energy_consumed_kwh -= charge_needed_kwh # Energy is added back
+
+                # Add charging segment
+                charging_segment_step = RouteStep( # Using RouteStep for charging "segments"
+                    distance_km=0.0,
+                    duration_s=float(charge_time_minutes * 60), # Convert minutes to seconds
+                    geometry=[current_sim_coord, current_sim_coord], # No movement
+                    instruction=f"Charge at {suitable_charger.title} for {charge_time_minutes} minutes"
+                )
+                all_route_segments_parsed.append(charging_segment_step)
+
+                suitable_charger.recommended_charge_minutes = charge_time_minutes
+                suitable_charger.estimated_charge_added_kwh = charge_needed_kwh
+                charging_locations.append(suitable_charger)
+                print(f"Charged at {suitable_charger.title} for {charge_time_minutes} min. SOC: {current_soc_before_charge:.1f}% -> {current_soc_percent:.1f}%.")
+            else:
+                print(f"No significant charge needed at {suitable_charger.title}. Proceeding.")
+            
+            # After charging, we are at the charger. The loop will then calculate route from this new current_sim_coord.
+            # Continue the loop to recalculate the path to destination from the new point.
+            continue 
+        
+        # --- If No Charge Needed, Drive the Remaining Leg to Destination ---
+        # We already have the 'current_leg_parsed' data.
+        print(f"No charge needed. Driving remaining leg of {distance_to_destination_this_leg:.2f} km.")
+        
+        drive_distance_km = current_leg_parsed['total_distance_km']
+        drive_duration_s = current_leg_parsed['total_duration_s']
+        energy_consumed_drive_kwh = (drive_distance_km * consumption_wh_km) / 1000.0
+
+        soc_before_driving = current_soc_percent
+        current_soc_percent -= (energy_consumed_drive_kwh / battery_capacity_kwh) * 100.0
+        total_energy_consumed_kwh += energy_consumed_drive_kwh
+
+        # Add this final driving segment to overall route
+        if all_route_geometry and current_leg_parsed['route_geometry'] and all_route_geometry[-1] == current_leg_parsed['route_geometry'][0]:
+            all_route_geometry.extend(current_leg_parsed['route_geometry'][1:])
+        else:
+            all_route_geometry.extend(current_leg_parsed['route_geometry'])
+        all_route_segments_parsed.extend(current_leg_parsed['route_segments'])
+
+        total_optimized_distance_km += drive_distance_km
+        total_optimized_duration_s += drive_duration_s
+        
+        current_sim_coord = end_coord # Reached destination if no charge was needed in this leg
+
+    # Final checks
+    if current_sim_coord != end_coord:
+        raise UnfeasibleRouteError("Could not reach destination within maximum iterations. Route might be too complex or unfeasible.")
+
+    if current_soc_percent < min_charge_at_destination_for_ev:
+        # This check should ideally be caught by the loop, but as a safeguard.
+        print(f"Warning: Arrived at destination with {current_soc_percent:.1f}% SOC, which is below minimum {min_charge_at_destination_for_ev}%.")
+
+    final_charge_percent = max(0, min(100, int(current_soc_percent)))
+    total_duration_minutes = (total_optimized_duration_s / 60.0) + total_charging_duration_minutes
+    total_driving_minutes = total_optimized_duration_s / 60.0
 
     summary = RouteSummary(
-        total_distance_km=total_distance_covered_km,
+        total_distance_km=total_optimized_distance_km,
         total_duration_minutes=total_duration_minutes,
-        total_driving_minutes=total_driving_duration_minutes,
+        total_driving_minutes=total_driving_minutes,
         total_charging_minutes=total_charging_duration_minutes,
-        estimated_charging_stops=charging_stops_count,
+        estimated_charging_stops=len(charging_locations),
         total_energy_consumption_kwh=total_energy_consumed_kwh,
         final_charge_percent=final_charge_percent
     )
 
     return RouteResponse(
-        message="Route optimized successfully with charging stops",
+        message="Route planned successfully with charging locations",
         summary=summary,
-        route_segments=total_route_segments,
-        route_geometry=full_route_geometry
+        route_segments=all_route_segments_parsed,
+        route_geometry=all_route_geometry,
+        charging_locations=charging_locations
     )
+
+optimize_ev_route = plan_ev_route

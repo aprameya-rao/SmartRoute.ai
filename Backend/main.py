@@ -13,18 +13,14 @@ app = FastAPI(
     redoc_url="/redoc" # URL for alternative API documentation (ReDoc)
 )
 
-# Configure CORS (Cross-Origin Resource Sharing)
-# This allows your frontend (e.g., running on localhost:5173) to communicate with this backend.
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=[str(settings.FRONTEND_ORIGIN)], # List of origins allowed to make requests
-    allow_credentials=True, # Allow cookies, authorization headers, etc.
-    allow_methods=["*"],    # Allow all HTTP methods (GET, POST, PUT, DELETE, etc.)
-    allow_headers=["*"],    # Allow all headers in requests
+    allow_origins=["http://localhost:5173"],  # Your frontend URL
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
 )
 
-# Include your API router (all endpoints defined in api/v1/endpoints/route.py)
-# They will be prefixed with /api/v1 as defined in settings.API_V1_STR
 app.include_router(route.router, prefix=settings.API_V1_STR, tags=["Route Optimization"])
 
 # Basic root endpoint for health check or welcome message

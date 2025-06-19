@@ -22,7 +22,9 @@ async def find_charging_stations(
         "distanceunit": "KM",
         "maxresults": max_results,
         "compact": True, # Get a more compact response
-        # "key": settings.OPEN_CHARGE_MAP_API_KEY # Uncomment if you use a key
+        "key": settings.OPEN_CHARGE_MAP_API_KEY # If you have an OCM API Key, UNCOMMENT this line
+                                                # and ensure the key is in your .env file.
+                                                # Otherwise, keep it commented out.
     }
     async with httpx.AsyncClient() as client:
         try:
@@ -66,7 +68,7 @@ async def find_charging_stations(
                     address=address_str,
                     coordinates=coords,
                     connection_types=connections,
-                    power_kw=station_power_kw_overall, # Use the max power of any connection at this station
+                    power_kw=station_power_kw_overall,
                     is_free=poi.get('UsageCost') == "Free"
                 ))
             return stations
