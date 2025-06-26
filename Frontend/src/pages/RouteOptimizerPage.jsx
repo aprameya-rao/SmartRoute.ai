@@ -2,7 +2,6 @@ import React, { useState } from 'react';
 import RouteForm from '../components/RouteForm.jsx';
 import MapDisplay from '../components/MapDisplay.jsx';
 import RouteSummary from '../components/RouteSummary.jsx';
-import { optimizeEvRoute } from '../services/evApi.js';
 import './RouteOptimizerPage.css';
 
 function RouteOptimizerPage() {
@@ -10,40 +9,58 @@ function RouteOptimizerPage() {
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState(null);
 
+  const API_BASE_URL = 'http://localhost:8000'; // Your FastAPI base URL
+
   const handleOptimizeRoute = async (formData) => {
     setLoading(true);
     setError(null);
     setRouteResult(null);
 
     try {
-      const backendResult = await optimizeEvRoute(formData);
-
-      // Transform backendResult to match RouteSummary's expected props
-      const formattedForSummary = {
-        totalDistance: backendResult.summary.total_distance_km ? `${backendResult.summary.total_distance_km.toFixed(1)} km` : 'N/A',
-        estimatedTime: backendResult.summary.total_duration_minutes ? 
-                       `${Math.floor(backendResult.summary.total_duration_minutes / 60)}h ${Math.round(backendResult.summary.total_duration_minutes % 60)}m` : 'N/A',
-        // Provide separate driving and charging times as requested
-        totalDrivingTime: backendResult.summary.total_driving_minutes ? 
-                          `${Math.floor(backendResult.summary.total_driving_minutes / 60)}h ${Math.round(backendResult.summary.total_driving_minutes % 60)}m` : 'N/A',
-        totalChargingTime: backendResult.summary.total_charging_minutes ? 
-                           `${Math.floor(backendResult.summary.total_charging_minutes / 60)}h ${Math.round(backendResult.summary.total_charging_minutes % 60)}m` : 'N/A',
-        chargingStops: backendResult.charging_locations.map(stop => ({
-          name: stop.name,
-          type: stop.connection_types ? stop.connection_types.join(', ') : 'Unknown',
-          power: stop.power_kw ? `${stop.power_kw} kW` : 'N/A',
-          location: stop.address || 'Unknown Address',
-          chargeTime: stop.recommended_charge_minutes ? `${stop.recommended_charge_minutes} mins` : 'N/A',
-          cost: stop.usage_cost || (stop.is_free ? 'Free' : 'Not Specified')
-        })),
-        routeGeometry: backendResult.route_geometry // Pass geometry for map
+      // --- IMPORTANT: Prepare data types for backend ---
+      const dataToSend = {
+        ...formData,
+        current_charge_percent: parseInt(formData.current_charge_percent, 10), // Convert to integer
+        range_full_charge: parseFloat(formData.range_full_charge),           // Convert to float
       };
 
-      setRouteResult(formattedForSummary);
+      // --- IMPORTANT: Correct the API endpoint URL ---
+      const response = await fetch(`${API_BASE_URL}/api/v1/optimize-route`, { // ADDED `/api/v1`
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify(dataToSend), // Use the prepared dataToSend
+      });
+
+      if (!response.ok) {
+        let errorDetail = "Failed to optimize route. Please try again.";
+        try {
+          const errorData = await response.json();
+          // Backend 422 errors usually have a 'detail' array
+          if (response.status === 422 && Array.isArray(errorData.detail)) {
+              errorDetail = errorData.detail.map(err => `${err.loc.join('.')} - ${err.msg}`).join('; ');
+          } else {
+              errorDetail = errorData.detail || JSON.stringify(errorData) || errorDetail;
+          }
+        } catch (jsonError) {
+          // If response is not JSON, use generic message
+          // The issue is likely here. Ensure the backticks are standard.
+          errorDetail = `HTTP error! status: ${response.status}`; // THIS LINE IS THE FIX TARGET
+        }
+        throw new Error(errorDetail);
+      }
+
+      const formattedResultFromBackend = await response.json(); 
+      setRouteResult(formattedResultFromBackend);
 
     } catch (err) {
       console.error("Error optimizing route:", err);
-      setError(err.message || "Failed to optimize route. Please try again.");
+      if (err instanceof TypeError && err.message.includes('fetch')) {
+        setError('Unable to connect to the backend server. Please ensure the server is running and accessible.');
+      } else {
+        setError(err.message || "Failed to optimize route. Please check your inputs.");
+      }
     } finally {
       setLoading(false);
     }

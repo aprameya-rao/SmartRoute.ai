@@ -67,12 +67,23 @@ class RouteSummary(BaseModel):
     total_energy_consumption_kwh: float = Field(..., description="Total energy consumed (driving) in kWh.")
     final_charge_percent: int = Field(..., description="Estimated final SoC at the destination in percent.")
 
+# ADDED THIS CLASS: RouteDetails
+class RouteDetails(BaseModel):
+    """
+    Represents the detailed parsed response from a routing API (like GraphHopper).
+    This is what parse_graphhopper_response should return.
+    """
+    total_distance_km: float
+    total_duration_s: float
+    route_geometry: List[Coordinate]
+    route_segments: List[RouteStep]
+
 
 class RouteResponse(BaseModel):
     """The complete response for an EV route planning request."""
     message: str = Field(..., description="A message regarding the route planning status.")
     summary: RouteSummary = Field(..., description="Summary of the planned route.")
-    route_segments: List[RouteStep] = Field(..., description="List of detailed route steps/instructions.")
+    route_segments: List[RouteStep] = Field(..., description="List of detailed route steps/instructions. (NOTE: This now represents ALL steps from the full optimized route, combining driving and charging.)")
     route_geometry: List[Coordinate] = Field(..., description="Full geographical geometry of the route as a list of coordinates.")
     charging_locations: List[ChargingStation] = Field(..., description="Details of recommended charging stations along the route.")
 
