@@ -1,366 +1,483 @@
-import math
+# Backend/services/ev_optimizer.py
+
+import httpx
 import asyncio
-from typing import List, Tuple, Dict, Any, Optional
+from typing import List, Dict, Any, Optional
+import math
+import traceback
 
-from api.v1.models.route_response import Coordinate, RouteResponse, RouteStep, ChargingStation, RouteRequest, RouteSummary, RouteSegment
-from services.routing import get_detailed_route_from_graphhopper, parse_graphhopper_response
-from services.charging_stations import find_charging_stations
-from services.geocoding import get_coordinates
+from .geocoding import get_coordinates
+from .routing import get_detailed_route_from_google, parse_google_directions_response
+# Assuming services.charging_stations exists and has find_charging_stations
+from .charging_stations import find_charging_stations # Still needed for charger lookup
 
-MIN_CHARGE_AT_DESTINATION_PERCENT = 20
-CHARGE_THRESHOLD_PERCENT = 15 # Consider charging if SOC drops below this
-TARGET_CHARGE_PERCENT_AT_STOP = 80 # Target SOC after a charging stop
-MIN_CHARGER_POWER_KW_FAST = 50
-MIN_CHARGER_POWER_KW_ANY = 22
+from api.v1.models.route_response import (
+    RouteResponse,
+    RouteSummary,
+    RouteDetails,
+    Coordinate,
+    RouteStep
+)
+from pydantic import ValidationError
 
-# MANUAL DATABASE: EV_MODELS
+# Define your EV models data here
 EV_MODELS = {
-    "tata nexon ev": {
-        "battery_capacity_kwh": 30.2,
-        "consumption_wh_km": 156,
-        "usable_soc_min": 10,
-        "usable_soc_max": 90,
-        "charging_profile_kw": [
-            {"soc_percent": 0, "power_kw": 25},
-            {"soc_percent": 80, "power_kw": 15},
-            {"soc_percent": 90, "power_kw": 8},
-        ]
-    },
-    "tesla model 3 long range": {
+    "Tesla Model 3 Long Range": {
         "battery_capacity_kwh": 75.0,
-        "consumption_wh_km": 150,
-        "usable_soc_min": 10,
-        "usable_soc_max": 90,
-        "charging_profile_kw": [
-            {"soc_percent": 0, "power_kw": 250},
-            {"soc_percent": 50, "power_kw": 150},
-            {"soc_percent": 80, "power_kw": 50},
-            {"soc_percent": 90, "power_kw": 20},
-        ]
+        "consumption_wh_km": 150.0,
+        "charging_speed_kw_standard": 11.0,
+        "charging_speed_kw_fast": 250.0
     },
-    "hyundai kona electric": {
-        "battery_capacity_kwh": 39.2,
-        "consumption_wh_km": 140, # Example consumption
-        "usable_soc_min": 10,
-        "usable_soc_max": 90,
-        "charging_profile_kw": [
-            {"soc_percent": 0, "power_kw": 50},
-            {"soc_percent": 80, "power_kw": 25},
-            {"soc_percent": 90, "power_kw": 10},
-        ]
+    "Tata Nexon EV": {
+        "battery_capacity_kwh": 40.0,
+        "consumption_wh_km": 135.0,
+        "charging_speed_kw_standard": 7.2,
+        "charging_speed_kw_fast": 50.0
     },
-    "mg zs ev": {
-        "battery_capacity_kwh": 50.3,
-        "consumption_wh_km": 160, # Example consumption
-        "usable_soc_min": 10,
-        "usable_soc_max": 90,
-        "charging_profile_kw": [
-            {"soc_percent": 0, "power_kw": 80},
-            {"soc_percent": 80, "power_kw": 30},
-            {"soc_percent": 90, "power_kw": 15},
-        ]
+    "Nissan Leaf (40 kWh)": {
+        "battery_capacity_kwh": 40.0,
+        "consumption_wh_km": 170.0,
+        "charging_speed_kw_standard": 6.6,
+        "charging_speed_kw_fast": 50.0
+    },
+    "Hyundai Kona Electric (64 kWh)": {
+        "battery_capacity_kwh": 64.0,
+        "consumption_wh_km": 160.0,
+        "charging_speed_kw_standard": 7.2,
+        "charging_speed_kw_fast": 77.0
     }
 }
 
-
+# Custom Exception for unfeasible routes
 class UnfeasibleRouteError(Exception):
-    """Custom exception raised when a route cannot be planned due to insufficient charging options."""
+    """Custom exception for when a route is not feasible due to low SOC."""
     pass
 
-def get_charging_power_for_soc(ev_type_data: Dict[str, Any], current_soc_percent: float) -> float:
+# Helper function: Calculate Haversine distance between two Coordinates
+def _calculate_haversine_distance(coord1: Coordinate, coord2: Coordinate) -> float:
     """
-    Determines the charging power (kW) an EV can receive at a given State of Charge (SoC).
+    Calculates the Haversine distance between two Coordinate objects in kilometers.
     """
-    profile = ev_type_data["charging_profile_kw"]
-    # Sort the profile to ensure ascending order by soc_percent
-    profile.sort(key=lambda x: x["soc_percent"])
+    R = 6371  # Radius of Earth in kilometers
 
-    # If current_soc_percent is below the first defined point, use the first power
-    if current_soc_percent < profile[0]["soc_percent"]:
-        return profile[0]["power_kw"]
-    
-    for i in range(len(profile) - 1):
-        if current_soc_percent >= profile[i]["soc_percent"] and current_soc_percent < profile[i+1]["soc_percent"]:
-            # Linear interpolation or just take the lower bound power
-            # For simplicity, taking the power at the lower bound of the interval
-            return profile[i]["power_kw"]
-    
-    if current_soc_percent >= profile[-1]["soc_percent"]:
-        return profile[-1]["power_kw"]
-    
-    return 0.0 # Should not happen if profile is well-defined
+    lat1_rad = math.radians(coord1.lat)
+    lon1_rad = math.radians(coord1.lon)
+    lat2_rad = math.radians(coord2.lat)
+    lon2_rad = math.radians(coord2.lon)
 
-def calculate_consumption_wh_km_from_range(battery_capacity_kwh: float, range_km: float) -> float:
+    dlon = lon2_rad - lon1_rad
+    dlat = lat2_rad - lat1_rad
+
+    a = math.sin(dlat / 2)**2 + math.cos(lat1_rad) * math.cos(lat2_rad) * math.sin(dlon / 2)**2
+    c = 2 * math.atan2(math.sqrt(a), math.sqrt(1 - a))
+
+    distance = R * c
+    return distance
+
+# Helper function to find a point along a polyline at a given distance
+def _find_point_along_polyline(
+    start_coord: Coordinate,
+    polyline_coords: List[Coordinate],
+    target_distance_km: float
+) -> Optional[Coordinate]:
     """
-    Calculates the energy consumption rate (Wh/km) of an EV based on its battery capacity and estimated range.
+    Finds a Coordinate along a given polyline at approximately the target_distance_km
+    from the start_coord. Assumes polyline_coords represents a path starting near start_coord.
+    Returns None if target_distance_km exceeds polyline length.
     """
-    if range_km <= 0:
-        # Default to a reasonable value if range_km is invalid, to prevent division by zero
-        return 150 # Wh/km as a default, adjust if needed
-    return (battery_capacity_kwh * 1000) / range_km
+    if not polyline_coords:
+        return None
 
-
-async def plan_ev_route(request: RouteRequest) -> RouteResponse:
-    """
-    Plans an optimized EV route, including identifying necessary charging stops.
-    The core algorithm is modified to handle multi-leg journeys by simulating segments
-    within the car's drivable range.
-    """                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                 
-    ev_key = request.ev_type.lower().strip()
-    ev_info = EV_MODELS.get(ev_key)
-    if not ev_info:
-        raise ValueError(f"EV type '{request.ev_type}' not found in database. Cannot determine battery capacity or charging profile.")
-
-    battery_capacity_kwh = ev_info["battery_capacity_kwh"]
-    consumption_wh_km = calculate_consumption_wh_km_from_range(battery_capacity_kwh, request.range_full_charge)
+    current_distance_traversed = 0.0
     
-    usable_soc_min = ev_info["usable_soc_min"]
-    usable_soc_max = ev_info["usable_soc_max"]
+    # Find the starting point in the polyline_coords that is closest to start_coord
+    best_start_index = 0
+    min_dist = float('inf')
+    for i, coord in enumerate(polyline_coords):
+        dist_to_coord = _calculate_haversine_distance(start_coord, coord)
+        if dist_to_coord < min_dist:
+            min_dist = dist_to_coord
+            best_start_index = i
     
-    # Ensure thresholds respect usable battery range
-    charge_threshold_for_ev = max(CHARGE_THRESHOLD_PERCENT, usable_soc_min)
-    target_charge_for_ev = min(TARGET_CHARGE_PERCENT_AT_STOP, usable_soc_max)
-    min_charge_at_destination_for_ev = max(MIN_CHARGE_AT_DESTINATION_PERCENT, usable_soc_min)
-    
-    charging_preference = getattr(request, 'charging_preference', 'standard').lower()
-    min_charger_power = MIN_CHARGER_POWER_KW_FAST if charging_preference == 'fast' else MIN_CHARGER_POWER_KW_ANY
+    previous_point = polyline_coords[best_start_index]
 
-    # Geocode start and end locations
-    start_coord = await get_coordinates(request.start_location)
-    end_coord = await get_coordinates(request.end_location)
+    for i in range(best_start_index + 1, len(polyline_coords)):
+        current_point = polyline_coords[i]
+        segment_length = _calculate_haversine_distance(previous_point, current_point)
 
-    if not start_coord:
-        raise ValueError(f"Could not geocode start location: {request.start_location}")
-    if not end_coord:
-        raise ValueError(f"Could not geocode end location: {request.end_location}")
-
-    # Initialize simulation variables
-    current_sim_coord = start_coord
-    current_soc_percent = float(request.current_charge_percent)
-    
-    total_optimized_distance_km = 0.0
-    total_optimized_duration_s = 0.0 # Total driving and charging duration in seconds
-    total_charging_duration_minutes = 0.0
-    total_energy_consumed_kwh = 0.0 # Tracks net energy consumed (driving - charging)
-
-    all_route_geometry: List[Coordinate] = []
-    all_route_segments_parsed: List[RouteStep] = []
-    charging_locations: List[ChargingStation] = []
-    
-    # Loop to simulate journey and add charging stops
-    max_iterations =50# Safety break for infinite loops, increased for longer trips
-    current_iteration = 0
-
-    while current_sim_coord != end_coord and current_iteration < max_iterations:
-        current_iteration += 1
-        
-        # Calculate maximum drivable distance for the current SOC before hitting CHARGE_THRESHOLD_PERCENT
-        # or going below usable_soc_min
-        available_soc_for_driving = current_soc_percent - charge_threshold_for_ev
-        if available_soc_for_driving <= 0:
-            # If current SOC is already at or below threshold, we NEED to charge ASAP
-            # Set drivable_range_km to a small value to force a charger search
-            drivable_range_km = 1.0 # Minimal range to initiate search
-            print(f"DEBUG: SOC {current_soc_percent:.1f}% <= Threshold {charge_threshold_for_ev}%. Forcing immediate charge search.")
-        else:
-            kwh_available_for_driving = (available_soc_for_driving / 100.0) * battery_capacity_kwh
-            drivable_range_km = (kwh_available_for_driving * 1000.0) / consumption_wh_km
-            print(f"DEBUG: Current SOC: {current_soc_percent:.1f}%. Drivable range to threshold ({charge_threshold_for_ev}%): {drivable_range_km:.2f} km.")
-
-        # 1. Get route to the final destination to check total distance and determine next segment
-        gh_response_to_final_dest = await get_detailed_route_from_graphhopper(current_sim_coord, end_coord)
-        route_to_final_dest_parsed = parse_graphhopper_response(gh_response_to_final_dest)
-
-        # CHANGE: Access properties using dot notation
-        if not route_to_final_dest_parsed or not route_to_final_dest_parsed.route_geometry:
-            raise RuntimeError(f"Could not retrieve route from {current_sim_coord.lat:.4f},{current_sim_coord.lon:.4f} to final destination.")
-
-        # CHANGE: Access properties using dot notation
-        distance_remaining_to_final_dest = route_to_final_dest_parsed.total_distance_km
-        
-        # Calculate energy needed to reach destination from current point with buffer
-        kwh_needed_to_destination = (distance_remaining_to_final_dest * consumption_wh_km) / 1000.0
-        soc_needed_to_destination = (kwh_needed_to_destination / battery_capacity_kwh) * 100.0
-        
-        can_reach_final_destination_with_buffer = (current_soc_percent - soc_needed_to_destination) >= min_charge_at_destination_for_ev
-
-        # Decide whether to find a charger or drive directly to destination
-        if not can_reach_final_destination_with_buffer:
-            print(f"DEBUG: Cannot reach final destination with required SOC. Current SOC {current_soc_percent:.1f}%, needed {soc_needed_to_destination:.1f}% to arrive at {min_charge_at_destination_for_ev}%. Looking for charging station.")
+        if current_distance_traversed + segment_length >= target_distance_km:
+            remaining_dist_in_segment = target_distance_km - current_distance_traversed
+            interpolation_factor = remaining_dist_in_segment / segment_length if segment_length > 0 else 0
             
-            # Search for chargers *ahead* within drivable range + a small buffer
-            # This search needs to be more intelligent, potentially along the route segment.
-            # For simplicity, we'll search near the current location, but a more advanced
-            # algorithm would find chargers along the projected path.
-            # Let's use a slightly larger search radius here, but not too far.
-            search_radius_km = max(25, min(drivable_range_km + 50, 100)) # Search up to 100km or drivable_range + 50km
+            interpolated_lat = previous_point.lat + (current_point.lat - previous_point.lat) * interpolation_factor
+            interpolated_lon = previous_point.lon + (current_point.lon - previous_point.lon) * interpolation_factor
             
-            # To simulate searching along the route, we can take a point partway along the route to destination
-            # This is a simplification; ideally, you'd iterate along the route geometry.
-            # For now, let's just search from the current_sim_coord.
-            
-            nearby_chargers = await find_charging_stations(
-                latitude=current_sim_coord.lat,
-                longitude=current_sim_coord.lon,
-                distance_km=search_radius_km, # Search further for a charger
-                max_results=20, # Get more results to find a suitable one
-                min_power_kw=min_charger_power
+            return Coordinate(lat=interpolated_lat, lon=interpolated_lon)
+        
+        current_distance_traversed += segment_length
+        previous_point = current_point
+    
+    return None
+
+async def optimize_ev_route(
+    start_location: str,
+    end_location: str,
+    ev_type: str,
+    current_charge_percent: int,
+    min_soc_percent: float = 10.0, # Minimum SOC to maintain (e.g., at end of segment)
+    target_soc_percent: float = 90.0, # Target SOC when charging as per new algo step 9
+    charging_preference: str = "standard", # "standard" or "fast"
+    max_iterations: int = 20, # Increased iterations for complex routes
+    highway_factor: float = 1.2, # Factor for increased consumption on highways
+    segment_planning_length_km: float = 100.0 # Your new segment length (Step 4)
+) -> RouteResponse:
+    try:
+        # --- Step 1: Take the start and end location ---
+        # Handled by function parameters.
+
+        # --- 1. Look up EV specific data ---
+        ev_data = EV_MODELS.get(ev_type)
+        if not ev_data:
+            raise ValueError(f"EV type '{ev_type}' not found in supported models. Please provide valid EV type.")
+
+        battery_capacity_kwh = ev_data["battery_capacity_kwh"]
+        consumption_wh_km = ev_data["consumption_wh_km"]
+        
+        # Determine charging speed based on preference
+        if charging_preference.lower() == "fast":
+            charging_speed_kw = ev_data["charging_speed_kw_fast"]
+        else: # Default to standard
+            charging_speed_kw = ev_data["charging_speed_kw_standard"]
+
+        # --- 2. Geocode Start and End Addresses ---
+        start_coord = await get_coordinates(start_location)
+        end_coord = await get_coordinates(end_location)
+
+        if not start_coord:
+            return RouteResponse(success=False, message=f"Could not geocode start address: {start_location}")
+        if not end_coord:
+            return RouteResponse(success=False, message=f"Could not geocode end address: {end_location}")
+
+        print(f"DEBUG: Using EV: {ev_type} (Battery: {battery_capacity_kwh} kWh, Consumption: {consumption_wh_km} Wh/km)")
+        print(f"DEBUG: Charging preference: {charging_preference}, Speed: {charging_speed_kw} kW")
+        effective_consumption_kwh_km = (consumption_wh_km * highway_factor) / 1000 # Convert Wh/km to kWh/km
+        print(f"DEBUG: Effective consumption: {effective_consumption_kwh_km:.3f} kWh/km (with highway factor {highway_factor})")
+
+        current_soc_kwh = (current_charge_percent / 100.0) * battery_capacity_kwh
+        current_soc_percent = float(current_charge_percent)
+
+        total_optimized_distance_km = 0.0
+        total_optimized_duration_s = 0
+        total_energy_consumed_kwh = 0.0
+        total_charging_duration_minutes = 0.0
+        charging_locations_coords: List[Coordinate] = [] # Stores coordinates of charging stops
+        all_route_segments_parsed: List[RouteStep] = []
+        full_route_geometry_coords: List[Coordinate] = [] # Accumulates geometry for entire optimized path
+
+        current_position = start_coord
+
+        # --- Step 2: Get the complete route from the start to end without any ev optimisation ---
+        full_route_google_response = await get_detailed_route_from_google(start_coord, end_coord)
+        if not full_route_google_response:
+            raise Exception("Failed to get initial full route from Google Maps. Cannot plan route.")
+        
+        parsed_full_route = parse_google_directions_response(full_route_google_response)
+        if not parsed_full_route or not parsed_full_route.route_geometry:
+            raise Exception("Failed to parse initial full route geometry. Cannot plan route.")
+        
+        main_route_polyline = parsed_full_route.route_geometry
+        total_route_distance_km = parsed_full_route.total_distance_km
+        total_route_energy_needed_kwh = total_route_distance_km * effective_consumption_kwh_km
+        
+        # --- Step 3: if the route can be completed with the available charge, plan it and tell no charging required ---
+        energy_remaining_at_dest_kwh = current_soc_kwh - total_route_energy_needed_kwh
+        soc_remaining_at_dest_percent = (energy_remaining_at_dest_kwh / battery_capacity_kwh) * 100
+
+        if soc_remaining_at_dest_percent >= min_soc_percent:
+            print(f"DEBUG: Route can be completed without charging. Final SOC: {soc_remaining_at_dest_percent:.1f}%")
+            return RouteResponse(
+                success=True,
+                message="Route planned successfully! No charging stops required.",
+                route_summary=RouteSummary(
+                    totalDistanceKm=total_route_distance_km,
+                    totalDurationMinutes=parsed_full_route.total_duration_s / 60.0,
+                    totalDrivingMinutes=parsed_full_route.total_duration_s / 60.0,
+                    totalChargingMinutes=0.0,
+                    estimatedChargingStops=0,
+                    totalEnergyConsumptionKwh=total_route_energy_needed_kwh,
+                    finalChargePercent=soc_remaining_at_dest_percent
+                ),
+                route_details=parsed_full_route # Return the full parsed route
             )
-            
-            # Filter chargers that are actually "on the way" or at least not too far off
-            # This is a critical point: how do you pick the *best* charger?
-            # For simplicity, we'll take the closest one that meets power requirements and is somewhat forward.
-            
-            suitable_charger: Optional[ChargingStation] = None
-            if nearby_chargers:
-                # Sort by distance (closest first)
-                nearby_chargers.sort(key=lambda x: x.distance_km if x.distance_km is not None else float('inf'))
-                
-                for charger in nearby_chargers:
-                    if charger.power_kw and charger.power_kw >= min_charger_power:
-                        # Before selecting, quickly check if we can even reach *this charger*
-                        # This avoids selecting a charger that's beyond the current effective range
-                        temp_gh_response = await get_detailed_route_from_graphhopper(current_sim_coord, charger.coordinates)
-                        temp_route_parsed = parse_graphhopper_response(temp_gh_response)
-                        
-                        # CHANGE: Access properties using dot notation
-                        if temp_route_parsed and temp_route_parsed.total_distance_km < (drivable_range_km + 10): # Add a small buffer for driving to charger
-                            suitable_charger = charger
-                            break
-                        else:
-                            # CHANGE: Access properties using dot notation
-                            print(f"DEBUG: Charger {charger.title} at {charger.coordinates.lat:.4f},{charger.coordinates.lon:.4f} is too far ({temp_route_parsed.total_distance_km:.2f} km) to reach with current SOC, skipping.")
-            
-            if not suitable_charger:
-                raise UnfeasibleRouteError(
-                    f"No suitable charging station found near {current_sim_coord.lat:.4f}, "
-                    f"{current_sim_coord.lon:.4f} with min power {min_charger_power}kW "
-                    f"within {search_radius_km}km. Current SOC: {current_soc_percent:.1f}%. Route cannot be completed."
-                )
-            
-            # Set the next segment's end to the chosen charger
-            segment_end_coord = suitable_charger.coordinates
-            print(f"DEBUG: Found suitable charger: {suitable_charger.title} at {suitable_charger.coordinates.lat:.4f}, {suitable_charger.coordinates.lon:.4f}. Planning segment to charger.")
-            
-        else:
-            # Can reach final destination with current SOC
-            print(f"DEBUG: Can reach final destination ({distance_remaining_to_final_dest:.2f} km) with sufficient SOC. Planning final segment.")
-            segment_end_coord = end_coord
 
+        # --- Step 4: if it doesn't work then break the whole route into segments of 100kms ---
+        print(f"DEBUG: Route cannot be completed without charging. Initiating segment-based optimization (segments of {segment_planning_length_km}km).")
 
-        # 2. Route the *current segment* (either to charger or to final destination)
-        gh_response_segment = await get_detailed_route_from_graphhopper(current_sim_coord, segment_end_coord)
-        segment_parsed = parse_graphhopper_response(gh_response_segment)
-
-        # CHANGE: Access properties using dot notation
-        if not segment_parsed or not segment_parsed.route_geometry:
-            raise RuntimeError(f"Could not retrieve route segment from {current_sim_coord.lat:.4f},{current_sim_coord.lon:.4f} to {segment_end_coord.lat:.4f},{segment_end_coord.lon:.4f}.")
-
-        # CHANGE: Access properties using dot notation
-        drive_distance_km = segment_parsed.total_distance_km
-        # CHANGE: Access properties using dot notation
-        drive_duration_s = segment_parsed.total_duration_s
-        energy_consumed_drive_kwh = (drive_distance_km * consumption_wh_km) / 1000.0
-
-        # Simulate driving this segment
-        soc_before_driving = current_soc_percent
-        current_soc_percent -= (energy_consumed_drive_kwh / battery_capacity_kwh) * 100.0
-        total_energy_consumed_kwh += energy_consumed_drive_kwh
-
-        # Add this driving segment to overall route
-        # CHANGE: Access properties using dot notation
-        if all_route_geometry and segment_parsed.route_geometry and all_route_geometry[-1] == segment_parsed.route_geometry[0]:
-            all_route_geometry.extend(segment_parsed.route_geometry[1:])
-        else:
-            all_route_geometry.extend(segment_parsed.route_geometry)
-        # CHANGE: Access properties using dot notation
-        all_route_segments_parsed.extend(segment_parsed.route_segments)
+        # Initializing for iterative planning
+        current_polyline_index = 0
+        # Find the closest index in the main_route_polyline to start_coord
+        min_dist_to_start_polyline = float('inf')
+        for i, coord in enumerate(main_route_polyline):
+            dist = _calculate_haversine_distance(start_coord, coord)
+            if dist < min_dist_to_start_polyline:
+                min_dist_to_start_polyline = dist
+                current_polyline_index = i
         
-        total_optimized_distance_km += drive_distance_km
-        total_optimized_duration_s += drive_duration_s
+        iteration = 0
+        # Loop until current_position is very close to the end destination
+        while _calculate_haversine_distance(current_position, end_coord) > 0.01 and iteration < max_iterations:
+            iteration += 1
+            print(f"\n--- Optimization Iteration {iteration} --- Current Pos: {current_position.lat:.4f},{current_position.lon:.4f} SOC: {current_soc_percent:.1f}% ---")
 
-        current_sim_coord = segment_end_coord # Update current location to end of segment
-        print(f"DEBUG: Drove {drive_distance_km:.2f} km. SOC: {soc_before_driving:.1f}% -> {current_soc_percent:.1f}%. New position: {current_sim_coord.lat:.4f},{current_sim_coord.lon:.4f}")
+            # Determine the end point of the *current planning segment*
+            # This is either 100km from current_position along the polyline, or the final destination.
+            segment_end_point_candidate = _find_point_along_polyline(
+                current_position,
+                main_route_polyline[current_polyline_index:],
+                segment_planning_length_km
+            )
 
-        # --- Handle Charging if arrived at a Charging Station ---
-        if current_sim_coord != end_coord and suitable_charger and current_sim_coord == suitable_charger.coordinates:
-            print(f"DEBUG: Arrived at charging station {suitable_charger.title}.")
-            # Simulate charging at the station
-            target_soc_kwh = (target_charge_for_ev / 100.0) * battery_capacity_kwh
-            current_soc_kwh = (current_soc_percent / 100.0) * battery_capacity_kwh
-            charge_needed_kwh = target_soc_kwh - current_soc_kwh
-
-            if charge_needed_kwh < 0.5: # Don't charge if almost full or negligible amount
-                charge_needed_kwh = 0.0 # Set to 0 if negligible
-                print(f"DEBUG: Negligible charge needed ({charge_needed_kwh:.2f} kWh). Skipping charge at {suitable_charger.title}.")
-
-            if charge_needed_kwh > 0:
-                ev_max_power = get_charging_power_for_soc(ev_info, current_soc_percent)
-                effective_charger_power = suitable_charger.power_kw if suitable_charger.power_kw else 0.0
-                effective_charging_rate_kw = min(ev_max_power, effective_charger_power)
-
-                if effective_charging_rate_kw <= 0: # Ensure positive power
-                    raise UnfeasibleRouteError(f"Effective charging power at {suitable_charger.title} is 0kW or less. Cannot charge.")
-                
-                charge_time_hours = charge_needed_kwh / effective_charging_rate_kw
-                charge_time_minutes = round(charge_time_hours * 60)
-                
-                # Update SOC after charging
-                current_soc_before_charge = current_soc_percent
-                current_soc_percent = (target_soc_kwh / battery_capacity_kwh) * 100.0
-                current_soc_percent = min(current_soc_percent, usable_soc_max) # Don't exceed max usable SOC
-
-                total_charging_duration_minutes += charge_time_minutes
-                total_energy_consumed_kwh -= charge_needed_kwh # Energy is added back to battery
-
-                # Add charging segment (no distance, just duration)
-                charging_segment_step = RouteStep(
-                    distance_km=0.0,
-                    duration_s=float(charge_time_minutes * 60), # Convert minutes to seconds
-                    geometry=[current_sim_coord, current_sim_coord], # No movement
-                    instruction=f"Charge at {suitable_charger.title} for {charge_time_minutes} minutes."
-                )
-                all_route_segments_parsed.append(charging_segment_step)
-
-                suitable_charger.recommended_charge_minutes = charge_time_minutes
-                suitable_charger.estimated_charge_added_kwh = charge_needed_kwh
-                charging_locations.append(suitable_charger)
-                print(f"DEBUG: Charged at {suitable_charger.title} for {charge_time_minutes} min. SOC: {current_soc_before_charge:.1f}% -> {current_soc_percent:.1f}%.")
+            # If the remaining path is shorter than segment_planning_length_km, or _find_point_along_polyline
+            # returns None, the next target is the final destination.
+            if segment_end_point_candidate is None or _calculate_haversine_distance(segment_end_point_candidate, end_coord) < 0.01:
+                next_target_coord = end_coord
+                print(f"DEBUG: Next planning target is final destination: {next_target_coord.lat:.4f},{next_target_coord.lon:.4f}")
             else:
-                print(f"DEBUG: No significant charge needed at {suitable_charger.title}. Proceeding.")
+                next_target_coord = segment_end_point_candidate
+                print(f"DEBUG: Next planning target is ~{segment_planning_length_km}km mark: {next_target_coord.lat:.4f},{next_target_coord.lon:.4f}")
             
-            # Reset suitable_charger so it doesn't try to charge at the same place repeatedly if not needed
-            suitable_charger = None
+            # Get the actual route for this segment from current_position to next_target_coord
+            actual_segment_route_response = await get_detailed_route_from_google(current_position, next_target_coord)
+            if not actual_segment_route_response:
+                raise Exception(f"Failed to get route for segment from {current_position} to {next_target_coord}")
             
-        # The loop will re-evaluate conditions for the next segment from the new current_sim_coord.
+            parsed_actual_segment_route = parse_google_directions_response(actual_segment_route_response)
+            if not parsed_actual_segment_route or not parsed_actual_segment_route.route_segments:
+                raise Exception(f"Failed to parse route details for segment from {current_position} to {next_target_coord}")
 
-    # Final checks
-    if current_sim_coord != end_coord:
-        raise UnfeasibleRouteError("Could not reach destination within maximum iterations. Route might be too long or unfeasible with given parameters.")
+            actual_segment_distance_km = parsed_actual_segment_route.total_distance_km
+            actual_segment_energy_needed_kwh = actual_segment_distance_km * effective_consumption_kwh_km
+            
+            # --- Step 5: if the vehicle can travel the first 100km segment then continue to step 7 else go to step 6 ---
+            # (This check now applies to ANY segment, not just the "first" for generality)
+            soc_after_driving_segment_kwh = current_soc_kwh - actual_segment_energy_needed_kwh
+            soc_after_driving_segment_percent = (soc_after_driving_segment_kwh / battery_capacity_kwh) * 100
 
-    if current_soc_percent < min_charge_at_destination_for_ev:
-        print(f"WARNING: Arrived at destination with {current_soc_percent:.1f}% SOC, which is below desired minimum {min_charge_at_destination_for_ev}%.")
+            charging_stop_required_now = False
 
-    final_charge_percent = max(0, min(100, int(current_soc_percent)))
-    total_duration_minutes = (total_optimized_duration_s / 60.0) + total_charging_duration_minutes
-    total_driving_minutes = total_optimized_duration_s / 60.0
+            if soc_after_driving_segment_percent < min_soc_percent:
+                print(f"DEBUG: SOC ({soc_after_driving_segment_percent:.1f}%) after driving planned segment ({actual_segment_distance_km:.2f}km) is below min_soc_percent ({min_soc_percent:.1f}%). Charging required.")
+                charging_stop_required_now = True
 
-    summary = RouteSummary(
-        total_distance_km=total_optimized_distance_km,
-        total_duration_minutes=total_duration_minutes,
-        total_driving_minutes=total_driving_minutes,
-        total_charging_minutes=total_charging_duration_minutes,
-        estimated_charging_stops=len(charging_locations),
-        total_energy_consumption_kwh=total_energy_consumed_kwh,
-        final_charge_percent=final_charge_percent
-    )
+                # Calculate max drivable distance based on current SOC down to min_soc_percent
+                energy_usable_for_drive = current_soc_kwh - (min_soc_percent / 100.0) * battery_capacity_kwh
+                max_drivable_km_before_critical = energy_usable_for_drive / effective_consumption_kwh_km if energy_usable_for_drive > 0 else 0.0
 
-    return RouteResponse(
-        message="Route planned successfully with charging locations",
-        summary=summary,
-        route_segments=all_route_segments_parsed,
-        route_geometry=all_route_geometry,
-        charging_locations=charging_locations
-    )
+                # Search radius for chargers: slightly beyond critical range, with a minimum.
+                search_radius_for_chargers_km = max(max_drivable_km_before_critical + 20, 50) # Buffer of 20km (from step 8) + minimum 50km
+                
+                # Find charging stations, prioritizing fast chargers if that's the preference
+                min_power_for_search = ev_data["charging_speed_kw_fast"] if charging_preference.lower() == "fast" else ev_data["charging_speed_kw_standard"]
 
-optimize_ev_route = plan_ev_route
+                found_stations = await find_charging_stations(
+                    latitude=current_position.lat,
+                    longitude=current_position.lon,
+                    distance_km=int(search_radius_for_chargers_km), # OCM API expects int
+                    max_results=5,
+                    min_power_kw=min_power_for_search
+                )
+                
+                best_reachable_charger_coord: Optional[Coordinate] = None
+                best_charger_route_distance = float('inf')
+
+                if found_stations:
+                    for station in found_stations:
+                        route_to_charger_response = await get_detailed_route_from_google(current_position, station.coordinates)
+                        if route_to_charger_response:
+                            parsed_route_to_charger = parse_google_directions_response(route_to_charger_response)
+                            if parsed_route_to_charger:
+                                energy_to_charger_kwh = parsed_route_to_charger.total_distance_km * effective_consumption_kwh_km
+                                if current_soc_kwh - energy_to_charger_kwh >= (min_soc_percent / 100.0) * battery_capacity_kwh:
+                                    if parsed_route_to_charger.total_distance_km < best_charger_route_distance:
+                                        best_reachable_charger_coord = station.coordinates
+                                        best_charger_route_distance = parsed_route_to_charger.total_distance_km
+                                        print(f"DEBUG: Found reachable charger candidate: {station.name} at {station.coordinates.lat:.4f},{station.coordinates.lon:.4f} (Dist: {parsed_route_to_charger.total_distance_km:.1f} km)")
+                
+                if best_reachable_charger_coord:
+                    next_actual_waypoint = best_reachable_charger_coord
+                    print(f"DEBUG: Routing to best reachable charging station at {next_actual_waypoint.lat:.4f},{next_actual_waypoint.lon:.4f}")
+                else:
+                    # --- Step 6: find the required charging to travel and return a message stating "Charge the vehicle to that much and continue else route wont finish" ---
+                    # If no reachable charger found, calculate what's needed at current spot
+                    # This happens if it cannot even reach the next potential charger.
+                    energy_needed_to_reach_next_safe_point = actual_segment_energy_needed_kwh # Or energy needed to reach _any_ point (e.g., 100km mark) safely
+                    
+                    # Calculate charge required to safely reach the next logical segment end or first charger.
+                    # This requires enough energy to drive the segment PLUS end with min_soc_percent
+                    required_soc_kwh_for_segment = (actual_segment_energy_needed_kwh + (min_soc_percent / 100.0) * battery_capacity_kwh)
+                    charge_needed_kwh_to_proceed = required_soc_kwh_for_segment - current_soc_kwh
+                    
+                    if charge_needed_kwh_to_proceed <= 0: # Should not happen if charging_stop_required_now is true, but safety check
+                        charge_needed_kwh_to_proceed = 0.1 # Minimum to trigger message
+                    
+                    charge_percent_needed = (charge_needed_kwh_to_proceed / battery_capacity_kwh) * 100
+                    
+                    # Create a RouteSummary with zero values for error state
+                    error_summary = RouteSummary(
+                        totalDistanceKm=0.0, totalDurationMinutes=0.0, totalDrivingMinutes=0.0,
+                        totalChargingMinutes=0.0, estimatedChargingStops=0, totalEnergyConsumptionKwh=0.0, finalChargePercent=current_soc_percent
+                    )
+                    return RouteResponse(
+                        success=False,
+                        message=f"Charge the vehicle by at least {charge_percent_needed:.1f}% ({charge_needed_kwh_to_proceed:.2f} kWh) at current location ({current_position.lat:.4f},{current_position.lon:.4f}) to continue, else route may not be feasible.",
+                        route_summary=error_summary,
+                        route_details=None
+                    )
+            else:
+                # Vehicle can complete the segment without dropping below min_soc_percent
+                next_actual_waypoint = next_target_coord # Drive to the end of the planned segment
+                print(f"DEBUG: Vehicle can drive planned segment. Routing to {next_actual_waypoint.lat:.4f},{next_actual_waypoint.lon:.4f}.")
+
+            # --- Step 10: Continue to complete the 100 km segment (or to the determined charging stop) ---
+            # Drive the actual calculated segment (to segment_end_point or found_charger)
+            final_driving_segment_response = await get_detailed_route_from_google(current_position, next_actual_waypoint)
+            if not final_driving_segment_response:
+                raise Exception(f"Failed to get final driving route from {current_position} to {next_actual_waypoint}")
+            
+            parsed_final_driving_segment = parse_google_directions_response(final_driving_segment_response)
+            if not parsed_final_driving_segment or not parsed_final_driving_segment.route_segments:
+                raise Exception(f"Failed to parse final driving route details for segment from {current_position} to {next_actual_waypoint}")
+
+            distance_driven_in_this_step_km = parsed_final_driving_segment.total_distance_km
+            duration_driven_in_this_step_s = parsed_final_driving_segment.total_duration_s
+            energy_consumed_in_this_step_kwh = distance_driven_in_this_step_km * effective_consumption_kwh_km
+
+            # Update overall route metrics
+            total_optimized_distance_km += distance_driven_in_this_step_km
+            total_optimized_duration_s += duration_driven_in_this_step_s
+            total_energy_consumed_kwh += energy_consumed_in_this_step_kwh
+
+            # Update SOC after driving
+            current_soc_kwh -= energy_consumed_in_this_step_kwh
+            current_soc_percent = (current_soc_kwh / battery_capacity_kwh) * 100
+            
+            all_route_segments_parsed.extend(parsed_final_driving_segment.route_segments)
+            
+            # Append geometry
+            if full_route_geometry_coords and parsed_final_driving_segment.route_geometry and \
+               _calculate_haversine_distance(full_route_geometry_coords[-1], parsed_final_driving_segment.route_geometry[0]) < 0.01:
+                full_route_geometry_coords.extend(parsed_final_driving_segment.route_geometry[1:])
+            else:
+                full_route_geometry_coords.extend(parsed_final_driving_segment.route_geometry)
+            
+            # Move current position to the end of the segment just driven
+            current_position = next_actual_waypoint
+            
+            # Advance current_polyline_index to ensure _find_point_along_polyline starts from the correct place
+            min_dist_to_current_pos_on_main_polyline = float('inf')
+            temp_idx_on_main = current_polyline_index # Start search from current_polyline_index onwards
+            for i in range(current_polyline_index, len(main_route_polyline)):
+                dist = _calculate_haversine_distance(current_position, main_route_polyline[i])
+                if dist < min_dist_to_current_pos_on_main_polyline:
+                    min_dist_to_current_pos_on_main_polyline = dist
+                    temp_idx_on_main = i
+            current_polyline_index = temp_idx_on_main
+
+
+            print(f"DEBUG: Drove {distance_driven_in_this_step_km:.2f} km. New SOC: {current_soc_percent:.1f}%")
+
+            # --- Step 9: if not able to travel the distance then find a charging station to charge upto 90% ---
+            # This logic is integrated as part of the `charging_stop_required_now` check.
+            # If `next_actual_waypoint` was a charger, perform charging now.
+            # Also, if we've reached the final destination and SOC is low, charge.
+            is_at_final_destination = _calculate_haversine_distance(current_position, end_coord) < 0.01
+
+            if charging_stop_required_now or (is_at_final_destination and current_soc_percent < min_soc_percent):
+                # If a charging stop was made or at the end with low SOC, charge to target_soc_percent (90%)
+                charge_target_percent_for_stop = 90.0 # As per Step 9's specific instruction
+                
+                charge_amount_kwh = ((charge_target_percent_for_stop / 100.0) * battery_capacity_kwh) - current_soc_kwh
+                
+                # Cap charge at full capacity
+                if current_soc_kwh + charge_amount_kwh > battery_capacity_kwh:
+                    charge_amount_kwh = battery_capacity_kwh - current_soc_kwh
+
+                if charge_amount_kwh > 0.01: # Only charge if a meaningful amount
+                    charge_duration_hours = charge_amount_kwh / charging_speed_kw
+                    charge_duration_minutes = charge_duration_hours * 60
+
+                    total_charging_duration_minutes += charge_duration_minutes
+                    current_soc_kwh += charge_amount_kwh
+                    current_soc_percent = (current_soc_kwh / battery_capacity_kwh) * 100
+                    
+                    print(f"DEBUG: Charged {charge_amount_kwh:.2f} kWh in {charge_duration_minutes:.1f} minutes. New SOC: {current_soc_percent:.1f}% (Target {charge_target_percent_for_stop:.1f}%)")
+                else:
+                    print("DEBUG: No meaningful charge needed at this point.")
+            
+        # Final check if the loop terminated because max_iterations was reached, but not at destination
+        if _calculate_haversine_distance(current_position, end_coord) > 0.01 and iteration >= max_iterations:
+             # --- Step 6 (part of): All options exhausted ---
+             raise UnfeasibleRouteError(f"Max iterations ({max_iterations}) reached. Could not find a feasible route to {end_location}.")
+
+
+        final_soc_percent = (current_soc_kwh / battery_capacity_kwh) * 100
+
+        # --- Step 12: return the data in the form required ---
+        summary = RouteSummary(
+            totalDistanceKm=total_optimized_distance_km,
+            totalDurationMinutes=(total_optimized_duration_s / 60.0) + total_charging_duration_minutes,
+            totalDrivingMinutes=total_optimized_duration_s / 60.0,
+            totalChargingMinutes=total_charging_duration_minutes,
+            estimatedChargingStops=len(charging_locations_coords),
+            totalEnergyConsumptionKwh=total_energy_consumed_kwh,
+            finalChargePercent=final_soc_percent
+        )
+
+        details = RouteDetails(
+            total_distance_km=total_optimized_distance_km,
+            total_duration_s=int(total_optimized_duration_s + (total_charging_duration_minutes * 60)),
+            route_segments=all_route_segments_parsed,
+            route_geometry=full_route_geometry_coords
+        )
+
+        print("Optimization complete. Returning result.")
+        return RouteResponse(
+            success=True,
+            message="Route optimized successfully!",
+            route_summary=summary,
+            route_details=details
+        )
+
+    except UnfeasibleRouteError as e:
+        print(f"UnfeasibleRouteError: {e}")
+        traceback.print_exc()
+        error_summary = RouteSummary(
+            totalDistanceKm=0.0, totalDurationMinutes=0.0, totalDrivingMinutes=0.0,
+            totalChargingMinutes=0.0, estimatedChargingStops=0, totalEnergyConsumptionKwh=0.0, finalChargePercent=0.0
+        )
+        return RouteResponse(
+            success=False, message=f"Route optimization failed: {str(e)}",
+            route_summary=error_summary, route_details=None
+        )
+    except ValidationError as e:
+        print(f"Validation error during optimization: {e.errors()}")
+        traceback.print_exc()
+        error_summary = RouteSummary(
+            totalDistanceKm=0.0, totalDurationMinutes=0.0, totalDrivingMinutes=0.0,
+            totalChargingMinutes=0.0, estimatedChargingStops=0, totalEnergyConsumptionKwh=0.0, finalChargePercent=0.0
+        )
+        return RouteResponse(
+            success=False, message=f"Invalid input data or internal model mismatch: {e.errors()}",
+            route_summary=error_summary, route_details=None
+        )
+    except Exception as e:
+        print(f"An unexpected error occurred during optimization: {e}")
+        traceback.print_exc()
+        error_summary = RouteSummary(
+            totalDistanceKm=0.0, totalDurationMinutes=0.0, totalDrivingMinutes=0.0,
+            totalChargingMinutes=0.0, estimatedChargingStops=0, totalEnergyConsumptionKwh=0.0, finalChargePercent=0.0
+        )
+        return RouteResponse(
+            success=False, message=f"An internal server error occurred: {str(e)}",
+            route_summary=error_summary, route_details=None
+        )

@@ -1,23 +1,22 @@
-import os
+# Backend/core/config.py
+
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 class Settings(BaseSettings):
+    # You can remove OPEN_ROUTE_SERVICE_API_KEY and GEOAPIFY_API_KEY if they are no longer used
+    # or keep them for now if you might revert or have other uses.
+    OPEN_ROUTE_SERVICE_API_KEY: str # Keep for now if not explicitly told to remove
+    GEOAPIFY_API_KEY: str # Keep for now if not explicitly told to remove
+
+    APP_NAME: str = "SmartRoute.ai"
+    Maps_API_KEY: str # <--- NEW: Your Google Cloud API Key
+
+    OPEN_CHARGE_MAP_API_KEY: str # This remains as is, for charging stations
+    
+    # Database settings
+    DATABASE_URL: str = "sqlite:///./ev_optimizer.db"
+
+    # Pydantic settings config model
     model_config = SettingsConfigDict(env_file=".env", extra="ignore")
 
-    # API Keys for external services
-    # OPEN_ROUTE_SERVICE_API_KEY: str = os.getenv("OPEN_ROUTE_SERVICE_API_KEY", "") # REMOVED THIS LINE
-    OPEN_CHARGE_MAP_API_KEY: str = os.getenv("OPEN_CHARGE_MAP_API_KEY", "")
-    GEOAPIFY_API_KEY: str = os.getenv("GEOAPIFY_API_KEY", "")
-    GRAPH_HOPPER_API_KEY: str = os.getenv("GRAPH_HOPPER_API_KEY", "")
-    GRAPHHOPPER_API_BASE_URL: str = os.getenv("GRAPHHOPPER_API_BASE_URL", "https://graphhopper.com/api/1/route")
-
-    # Other general application settings
-    APP_NAME: str = "SmartRoute.ai Backend"
-    API_V1_STR: str = "/api/v1"
-    DEBUG_MODE: bool = os.getenv("DEBUG_MODE", "False").lower() in ("true", "1", "t")
-    PROJECT_NAME: str = "SmartRoute.ai"
-
 settings = Settings()
-
-print(f"DEBUG: GraphHopper API Key loaded: '{settings.GRAPH_HOPPER_API_KEY}'")
-print(f"DEBUG: GraphHopper Base URL loaded: '{settings.GRAPHHOPPER_API_BASE_URL}'")

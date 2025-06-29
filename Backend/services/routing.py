@@ -1,103 +1,143 @@
+# Backend/services/routing.py
+
 import httpx
 from typing import List, Dict, Any, Optional
-import polyline 
+import polyline # Still useful for decoding Google's polylines
 from core.config import settings
-from api.v1.models.route_response import Coordinate, RouteStep, RouteDetails # Ensure RouteDetails is imported
+from api.v1.models.route_response import Coordinate, RouteStep, RouteDetails
+import re # For stripping HTML tags
+import traceback # Import for detailed error logging
 
-async def get_detailed_route_from_graphhopper(
+
+async def get_detailed_route_from_google(
     start_coord: Coordinate,
     end_coord: Coordinate,
-    vehicle: str = "car"
+    mode: str = "driving" # Google Directions API uses 'driving', 'walking', 'bicycling', 'transit'
 ) -> Optional[Dict[str, Any]]:
     """
-    Fetches detailed route information from the GraphHopper Directions API.
+    Fetches detailed route information from the Google Directions API.
     Returns the raw JSON response or None on error.
     """
-    url = settings.GRAPHHOPPER_API_BASE_URL
+    url = "https://maps.googleapis.com/maps/api/directions/json"
+    
     params = {
-        "point": [f"{start_coord.lat},{start_coord.lon}", f"{end_coord.lat},{end_coord.lon}"],
-        "locale": "en",
-        "instructions": "true",
-        "calc_points": "true",
-        "points_encoded": "true",
-        "key": settings.GRAPH_HOPPER_API_KEY,
-        "vehicle": vehicle
+        "origin": f"{start_coord.lat},{start_coord.lon}",
+        "destination": f"{end_coord.lat},{end_coord.lon}",
+        "mode": mode,
+        "units": "metric", # For kilometers and meters
+        "key": settings.Maps_API_KEY,
+        "alternatives": "false", # We usually want a single best route for optimization
+        "overview_polyline": "true" # Request overview polyline for the whole route
     }
+
+    print(f"DEBUG: Google Directions Request URL: {url}")
+    print(f"DEBUG: Google Directions Request Params: {params}")
 
     async with httpx.AsyncClient() as client:
         try:
             response = await client.get(url, params=params, timeout=30.0)
-            response.raise_for_status()
-            return response.json()
+            response.raise_for_status() # Raises HTTPStatusError for 4xx/5xx responses
+            data = response.json()
+            print(f"DEBUG: Raw Google Directions Response: {data}")
+
+            if data.get("status") == "OK":
+                return data
+            elif data.get("status") == "ZERO_RESULTS":
+                print(f"Google Directions API returned ZERO_RESULTS for route from {start_coord} to {end_coord}.")
+                return None
+            else:
+                # Log any other non-OK status with its message
+                print(f"Google Directions API Error: {data.get('status')}. Error message: {data.get('error_message', 'No error message')}")
+                return None
+
         except httpx.RequestError as e:
-            print(f"GraphHopper request error: An error occurred while requesting {e.request.url!r}.")
-            print(f"{e.__class__.__name__}: {e}")
+            print(f"Google Directions request error: An error occurred while requesting {e.request.url!r}. Details: {e}")
+            traceback.print_exc()
             return None
         except httpx.HTTPStatusError as e:
-            print(f"GraphHopper HTTP error: {e.response.status_code} - {e.response.text}")
+            print(f"Google Directions HTTP error: {e.response.status_code} - {e.response.text}")
+            print(f"Response content: {e.response.text}")
+            traceback.print_exc()
             return None
         except Exception as e:
-            print(f"Unexpected error in GraphHopper routing: {e}")
+            print(f"Unexpected error in Google Directions routing for {start_coord} to {end_coord}: {e}")
+            traceback.print_exc()
             return None
 
-def parse_graphhopper_response(gh_response: Optional[Dict[str, Any]]) -> RouteDetails:
+def parse_google_directions_response(google_response: Optional[Dict[str, Any]]) -> 'RouteDetails':
     """
-    Parses a GraphHopper Directions API response into a structured RouteDetails object.
-    Handles None input gracefully.
+    Parses the Google Directions API JSON response into a structured RouteDetails object.
     """
-    total_distance_km = 0.0
-    total_duration_s = 0.0
-    route_geometry: List[Coordinate] = []
+    if not google_response or not google_response.get('routes'):
+        print("Invalid, empty, or None Google Directions response. Returning default RouteDetails.")
+        return RouteDetails()
+
+    # Assuming we take the first route
+    route = google_response['routes'][0]
+    
+    total_distance_meters = 0
+    total_duration_seconds = 0
     route_segments: List[RouteStep] = []
+    all_route_geometry: List[Coordinate] = []
 
-    # CRITICAL CHANGE: Check if gh_response is None FIRST
-    if gh_response is None or not gh_response.get('paths'):
-        print("Invalid, empty, or None GraphHopper response. Returning default RouteDetails.")
-        return RouteDetails(
-            total_distance_km=total_distance_km,
-            total_duration_s=total_duration_s,
-            route_geometry=route_geometry,
-            route_segments=route_segments
-        )
+    # Google Directions API provides legs (segments between waypoints/origin/destination)
+    # And steps within each leg
+    for leg in route.get('legs', []):
+        if 'distance' in leg and 'value' in leg['distance']:
+            total_distance_meters += leg['distance']['value']
+        if 'duration' in leg and 'value' in leg['duration']:
+            total_duration_seconds += leg['duration']['value']
 
-    path = gh_response['paths'][0]
+        for step in leg.get('steps', []):
+            step_distance_meters = step.get('distance', {}).get('value', 0)
+            step_duration_seconds = step.get('duration', {}).get('value', 0)
+            
+            # Google provides HTML instructions, convert to text
+            instruction_html = step.get('html_instructions', '')
+            instruction_text = strip_html_tags(instruction_html)
 
-    total_distance_km = path.get('distance', 0) / 1000.0
-    total_duration_s = path.get('time', 0) / 1000.0
+            # Google does not typically provide a 'name' for each step like some other APIs.
+            # You can derive a name from the `html_instructions` or `maneuver` if needed,
+            # or leave it empty as per your model.
+            step_name = "" 
 
-    encoded_polyline_string = path.get('points')
-    decoded_coords_tuples = []
-    if encoded_polyline_string:
-        decoded_coords_tuples = polyline.decode(encoded_polyline_string, precision=5)
-        route_geometry = [Coordinate(lat=lat, lon=lon) for lat, lon in decoded_coords_tuples]
+            # Decode step-specific polyline (if available)
+            step_geometry: List[Coordinate] = []
+            if 'polyline' in step and 'points' in step['polyline']:
+                try:
+                    decoded_step_coords = polyline.decode(step['polyline']['points'])
+                    step_geometry = [Coordinate(lat=lat, lon=lon) for lat, lon in decoded_step_coords]
+                except Exception as e:
+                    print(f"Error decoding step polyline for step: {instruction_text}. Error: {e}")
+                    traceback.print_exc()
 
-    for instruction in path.get('instructions', []):
-        text = instruction.get('text', 'No instruction')
-        distance_m = instruction.get('distance', 0)
-        time_ms = instruction.get('time', 0)
-        name = instruction.get('street_name', None)
-        interval = instruction.get('interval')
-
-        segment_geometry: List[Coordinate] = []
-        if interval and decoded_coords_tuples:
-            try:
-                segment_coords_raw = decoded_coords_tuples[interval[0] : interval[1] + 1]
-                segment_geometry = [Coordinate(lat=lat, lon=lon) for lat, lon in segment_coords_raw]
-            except IndexError:
-                print(f"Warning: Instruction interval {interval} out of bounds for geometry of length {len(decoded_coords_tuples)}.")
-                segment_geometry = []
-
-        route_segments.append(RouteStep(
-            distance_km=distance_m / 1000.0,
-            duration_s=time_ms / 1000.0,
-            instruction=text,
-            name=name,
-            geometry=segment_geometry
-        ))
+            route_segments.append(RouteStep(
+                distance_km=step_distance_meters / 1000.0,
+                duration_s=step_duration_seconds,
+                instruction=instruction_text,
+                name=step_name,
+                geometry=step_geometry # Include step geometry
+            ))
+    
+    # Get the overall route geometry from overview_polyline for the entire route
+    overview_polyline_points = route.get('overview_polyline', {}).get('points')
+    if overview_polyline_points:
+        try:
+            decoded_overall_coords = polyline.decode(overview_polyline_points)
+            all_route_geometry = [Coordinate(lat=lat, lon=lon) for lat, lon in decoded_overall_coords]
+        except Exception as e:
+            print(f"Error decoding overview polyline: {e}")
+            traceback.print_exc()
 
     return RouteDetails(
-        total_distance_km=total_distance_km,
-        total_duration_s=total_duration_s,
-        route_geometry=route_geometry,
-        route_segments=route_segments
+        total_distance_km=total_distance_meters / 1000.0,
+        total_duration_s=total_duration_seconds,
+        route_segments=route_segments,
+        route_geometry=all_route_geometry
     )
+
+# Helper function to strip HTML tags (Google Directions instructions can be HTML)
+def strip_html_tags(text: str) -> str:
+    """Strips HTML tags from a string."""
+    clean = re.compile('<.*?>')
+    return re.sub(clean, '', text).strip()

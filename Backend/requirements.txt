@@ -2,7 +2,6 @@ fastapi
 uvicorn[standard]
 pydantic-settings
 httpx
-geopy
-python-multipart
-email_validator
-python-dotenv
+polyline
+SQLAlchemy 
+python-dotenv 
