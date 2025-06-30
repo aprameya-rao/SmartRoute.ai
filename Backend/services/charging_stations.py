@@ -24,11 +24,11 @@ async def find_charging_stations(
     }
     async with httpx.AsyncClient() as client:
         try:
-            print(f"DEBUG: Making OCM request to {url} with params: {params}")
+            #print(f"DEBUG: Making OCM request to {url} with params: {params}")
             response = await client.get(url, params=params, timeout=15.0)
             response.raise_for_status() # Raises HTTPStatusError for 4xx/5xx responses
             data = response.json()
-            print(f"DEBUG: Received OCM response. Number of POIs: {len(data)}")
+            #print(f"DEBUG: Received OCM response. Number of POIs: {len(data)}")
 
             stations = []
             for i, poi in enumerate(data):

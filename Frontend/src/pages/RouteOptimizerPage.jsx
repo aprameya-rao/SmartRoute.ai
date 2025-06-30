@@ -14,44 +14,35 @@ function RouteOptimizerPage() {
   const handleOptimizeRoute = async (formData) => {
     setLoading(true);
     setError(null);
-    setRouteResult(null);
+    setRouteResult(null); // Clear previous result on new submission
 
     try {
-      // --- IMPORTANT: Prepare data types for backend ---
-      const dataToSend = {
-        ...formData,
-        current_charge_percent: parseInt(formData.current_charge_percent, 10), // Convert to integer
-        range_full_charge: parseFloat(formData.range_full_charge),           // Convert to float
-      };
+      const dataToSend = formData;
 
-      // --- IMPORTANT: Correct the API endpoint URL ---
-      const response = await fetch(`${API_BASE_URL}/api/v1/optimize-route`, { // ADDED `/api/v1`
+      const response = await fetch(`${API_BASE_URL}/api/v1/optimize-route`, {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
         },
-        body: JSON.stringify(dataToSend), // Use the prepared dataToSend
+        body: JSON.stringify(dataToSend),
       });
 
       if (!response.ok) {
         let errorDetail = "Failed to optimize route. Please try again.";
         try {
           const errorData = await response.json();
-          // Backend 422 errors usually have a 'detail' array
           if (response.status === 422 && Array.isArray(errorData.detail)) {
               errorDetail = errorData.detail.map(err => `${err.loc.join('.')} - ${err.msg}`).join('; ');
           } else {
               errorDetail = errorData.detail || JSON.stringify(errorData) || errorDetail;
           }
         } catch (jsonError) {
-          // If response is not JSON, use generic message
-          // The issue is likely here. Ensure the backticks are standard.
-          errorDetail = `HTTP error! status: ${response.status}`; // THIS LINE IS THE FIX TARGET
+          errorDetail = `HTTP error! status: ${response.status}`;
         }
         throw new Error(errorDetail);
       }
 
-      const formattedResultFromBackend = await response.json(); 
+      const formattedResultFromBackend = await response.json();
       setRouteResult(formattedResultFromBackend);
 
     } catch (err) {
@@ -77,7 +68,14 @@ function RouteOptimizerPage() {
           {routeResult && <RouteSummary data={routeResult} />}
         </aside>
         <section className="map-section">
-          <MapDisplay routeData={routeResult} />
+          {/* --- IMPORTANT CHANGE: Add a key to MapDisplay --- */}
+          {/* This key forces React to re-mount MapDisplay when routeResult changes between null and a value,
+              or when a new route (with a different total distance) is received.
+              This can help synchronize React's DOM management with Google Maps' direct DOM manipulation. */}
+          <MapDisplay
+            routeData={routeResult}
+            key={routeResult ? `map-with-route-${routeResult.route_summary?.total_distance_km}` : 'map-no-route'}
+          />
         </section>
       </div>
     </div>

@@ -2,8 +2,7 @@ import React, { useState } from 'react';
 import './RouteForm.css';
 
 function RouteForm({ onSubmit, loading }) {
-  const [makeModel, setMakeModel] = useState('');
-  const [range, setRange] = useState('');
+  const [evType, setEvType] = useState('');
   const [currentCharge, setCurrentCharge] = useState('');
   const [startLocation, setStartLocation] = useState('');
   const [destination, setDestination] = useState('');
@@ -12,12 +11,11 @@ function RouteForm({ onSubmit, loading }) {
   const handleSubmit = (e) => {
     e.preventDefault();
     onSubmit({
-      makeModel,
-      range: parseFloat(range),
-      currentCharge: parseFloat(currentCharge),
-      startLocation,
-      destination,
-      preferredCharger: preferredCharger === 'fast' ? 'fast' : 'standard', 
+      ev_type: evType,
+      current_charge_percent: parseFloat(currentCharge),
+      start_location: startLocation,
+      end_location: destination,
+      charging_preference: preferredCharger === 'fast' ? 'fast' : 'standard', 
     });
   };
 
@@ -25,27 +23,17 @@ function RouteForm({ onSubmit, loading }) {
     <form className="route-form" onSubmit={handleSubmit}>
       <h2>Plan Your Journey</h2>
       <div className="form-group">
-        <label htmlFor="makeModel">Vehicle Make & Model:</label>
+        <label htmlFor="evType">Vehicle Make & Model:</label>
         <input
           type="text"
-          id="makeModel"
-          value={makeModel}
-          onChange={(e) => setMakeModel(e.target.value)}
+          id="evType"
+          value={evType}
+          onChange={(e) => setEvType(e.target.value)}
           placeholder="e.g., Tata Nexon EV Max"
           required
         />
       </div>
-      <div className="form-group">
-        <label htmlFor="range">Full Charge Range (km):</label>
-        <input
-          type="number"
-          id="range"
-          value={range}
-          onChange={(e) => setRange(e.target.value)}
-          placeholder="e.g., 453"
-          required
-        />
-      </div>
+      
       <div className="form-group">
         <label htmlFor="currentCharge">Current Battery (%):</label>
         <input

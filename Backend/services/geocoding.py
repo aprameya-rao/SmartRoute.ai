@@ -17,12 +17,12 @@ async def get_coordinates(address: str) -> Optional[Coordinate]:
 
     async with httpx.AsyncClient() as client:
         try:
-            print(f"DEBUG: Google Geocoding Request URL: {url}")
-            print(f"DEBUG: Google Geocoding Request Params: {params}")
+            #print(f"DEBUG: Google Geocoding Request URL: {url}")
+            #print(f"DEBUG: Google Geocoding Request Params: {params}")
             response = await client.get(url, params=params, timeout=10.0)
             response.raise_for_status() # Raises HTTPStatusError for 4xx/5xx responses
             data = response.json()
-            print(f"DEBUG: Raw Google Geocoding Response: {data}")
+            #print(f"DEBUG: Raw Google Geocoding Response: {data}")
 
             if data and data.get('results'):
                 # Google Geocoding API response structure: results[0]['geometry']['location']['lat'], results[0]['geometry']['location']['lng']

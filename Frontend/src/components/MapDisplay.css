@@ -1,20 +1,17 @@
-
-
 .map-container {
   width: 100%;
-  height: 100%; 
-  background-color: var(--color-light-gray);
-  border-radius: var(--border-radius);
+  height: 500px; /* Or adjust as needed */
+  background-color: #f0f0f0; /* Just a placeholder background */
+  border-radius: 8px;
+  overflow: hidden; /* To ensure map controls don't spill */
   display: flex;
-  align-items: center;
   justify-content: center;
-  color: var(--color-dark-gray);
-  font-style: italic;
-  font-size: 1.1rem;
-  text-align: center;
-  padding: var(--spacing-xl);
+  align-items: center;
+  color: #555;
 }
 
 .map-placeholder-text {
-  max-width: 80%;
+  text-align: center;
+  padding: 20px;
+  font-style: italic;
 }

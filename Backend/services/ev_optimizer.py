@@ -5,11 +5,9 @@ import asyncio
 from typing import List, Dict, Any, Optional
 import math
 import traceback
-
 from .geocoding import get_coordinates
 from .routing import get_detailed_route_from_google, parse_google_directions_response
-# Assuming services.charging_stations exists and has find_charging_stations
-from .charging_stations import find_charging_stations # Still needed for charger lookup
+from .charging_stations import find_charging_stations
 
 from api.v1.models.route_response import (
     RouteResponse,
@@ -158,10 +156,10 @@ async def optimize_ev_route(
         if not end_coord:
             return RouteResponse(success=False, message=f"Could not geocode end address: {end_location}")
 
-        print(f"DEBUG: Using EV: {ev_type} (Battery: {battery_capacity_kwh} kWh, Consumption: {consumption_wh_km} Wh/km)")
-        print(f"DEBUG: Charging preference: {charging_preference}, Speed: {charging_speed_kw} kW")
+        #print(f"DEBUG: Using EV: {ev_type} (Battery: {battery_capacity_kwh} kWh, Consumption: {consumption_wh_km} Wh/km)")
+        #print(f"DEBUG: Charging preference: {charging_preference}, Speed: {charging_speed_kw} kW")
         effective_consumption_kwh_km = (consumption_wh_km * highway_factor) / 1000 # Convert Wh/km to kWh/km
-        print(f"DEBUG: Effective consumption: {effective_consumption_kwh_km:.3f} kWh/km (with highway factor {highway_factor})")
+        #print(f"DEBUG: Effective consumption: {effective_consumption_kwh_km:.3f} kWh/km (with highway factor {highway_factor})")
 
         current_soc_kwh = (current_charge_percent / 100.0) * battery_capacity_kwh
         current_soc_percent = float(current_charge_percent)
@@ -194,7 +192,7 @@ async def optimize_ev_route(
         soc_remaining_at_dest_percent = (energy_remaining_at_dest_kwh / battery_capacity_kwh) * 100
 
         if soc_remaining_at_dest_percent >= min_soc_percent:
-            print(f"DEBUG: Route can be completed without charging. Final SOC: {soc_remaining_at_dest_percent:.1f}%")
+            #print(f"DEBUG: Route can be completed without charging. Final SOC: {soc_remaining_at_dest_percent:.1f}%")
             return RouteResponse(
                 success=True,
                 message="Route planned successfully! No charging stops required.",
@@ -211,7 +209,7 @@ async def optimize_ev_route(
             )
 
         # --- Step 4: if it doesn't work then break the whole route into segments of 100kms ---
-        print(f"DEBUG: Route cannot be completed without charging. Initiating segment-based optimization (segments of {segment_planning_length_km}km).")
+        #print(f"DEBUG: Route cannot be completed without charging. Initiating segment-based optimization (segments of {segment_planning_length_km}km).")
 
         # Initializing for iterative planning
         current_polyline_index = 0
@@ -227,7 +225,7 @@ async def optimize_ev_route(
         # Loop until current_position is very close to the end destination
         while _calculate_haversine_distance(current_position, end_coord) > 0.01 and iteration < max_iterations:
             iteration += 1
-            print(f"\n--- Optimization Iteration {iteration} --- Current Pos: {current_position.lat:.4f},{current_position.lon:.4f} SOC: {current_soc_percent:.1f}% ---")
+            #print(f"\n--- Optimization Iteration {iteration} --- Current Pos: {current_position.lat:.4f},{current_position.lon:.4f} SOC: {current_soc_percent:.1f}% ---")
 
             # Determine the end point of the *current planning segment*
             # This is either 100km from current_position along the polyline, or the final destination.
@@ -241,10 +239,10 @@ async def optimize_ev_route(
             # returns None, the next target is the final destination.
             if segment_end_point_candidate is None or _calculate_haversine_distance(segment_end_point_candidate, end_coord) < 0.01:
                 next_target_coord = end_coord
-                print(f"DEBUG: Next planning target is final destination: {next_target_coord.lat:.4f},{next_target_coord.lon:.4f}")
+                #print(f"DEBUG: Next planning target is final destination: {next_target_coord.lat:.4f},{next_target_coord.lon:.4f}")
             else:
                 next_target_coord = segment_end_point_candidate
-                print(f"DEBUG: Next planning target is ~{segment_planning_length_km}km mark: {next_target_coord.lat:.4f},{next_target_coord.lon:.4f}")
+                #print(f"DEBUG: Next planning target is ~{segment_planning_length_km}km mark: {next_target_coord.lat:.4f},{next_target_coord.lon:.4f}")
             
             # Get the actual route for this segment from current_position to next_target_coord
             actual_segment_route_response = await get_detailed_route_from_google(current_position, next_target_coord)
@@ -266,7 +264,7 @@ async def optimize_ev_route(
             charging_stop_required_now = False
 
             if soc_after_driving_segment_percent < min_soc_percent:
-                print(f"DEBUG: SOC ({soc_after_driving_segment_percent:.1f}%) after driving planned segment ({actual_segment_distance_km:.2f}km) is below min_soc_percent ({min_soc_percent:.1f}%). Charging required.")
+                #print(f"DEBUG: SOC ({soc_after_driving_segment_percent:.1f}%) after driving planned segment ({actual_segment_distance_km:.2f}km) is below min_soc_percent ({min_soc_percent:.1f}%). Charging required.")
                 charging_stop_required_now = True
 
                 # Calculate max drivable distance based on current SOC down to min_soc_percent
@@ -301,11 +299,11 @@ async def optimize_ev_route(
                                     if parsed_route_to_charger.total_distance_km < best_charger_route_distance:
                                         best_reachable_charger_coord = station.coordinates
                                         best_charger_route_distance = parsed_route_to_charger.total_distance_km
-                                        print(f"DEBUG: Found reachable charger candidate: {station.name} at {station.coordinates.lat:.4f},{station.coordinates.lon:.4f} (Dist: {parsed_route_to_charger.total_distance_km:.1f} km)")
+                                        #print(f"DEBUG: Found reachable charger candidate: {station.name} at {station.coordinates.lat:.4f},{station.coordinates.lon:.4f} (Dist: {parsed_route_to_charger.total_distance_km:.1f} km)")
                 
                 if best_reachable_charger_coord:
                     next_actual_waypoint = best_reachable_charger_coord
-                    print(f"DEBUG: Routing to best reachable charging station at {next_actual_waypoint.lat:.4f},{next_actual_waypoint.lon:.4f}")
+                    #print(f"DEBUG: Routing to best reachable charging station at {next_actual_waypoint.lat:.4f},{next_actual_waypoint.lon:.4f}")
                 else:
                     # --- Step 6: find the required charging to travel and return a message stating "Charge the vehicle to that much and continue else route wont finish" ---
                     # If no reachable charger found, calculate what's needed at current spot
@@ -336,7 +334,7 @@ async def optimize_ev_route(
             else:
                 # Vehicle can complete the segment without dropping below min_soc_percent
                 next_actual_waypoint = next_target_coord # Drive to the end of the planned segment
-                print(f"DEBUG: Vehicle can drive planned segment. Routing to {next_actual_waypoint.lat:.4f},{next_actual_waypoint.lon:.4f}.")
+                #print(f"DEBUG: Vehicle can drive planned segment. Routing to {next_actual_waypoint.lat:.4f},{next_actual_waypoint.lon:.4f}.")
 
             # --- Step 10: Continue to complete the 100 km segment (or to the determined charging stop) ---
             # Drive the actual calculated segment (to segment_end_point or found_charger)
@@ -384,7 +382,7 @@ async def optimize_ev_route(
             current_polyline_index = temp_idx_on_main
 
 
-            print(f"DEBUG: Drove {distance_driven_in_this_step_km:.2f} km. New SOC: {current_soc_percent:.1f}%")
+            #print(f"DEBUG: Drove {distance_driven_in_this_step_km:.2f} km. New SOC: {current_soc_percent:.1f}%")
 
             # --- Step 9: if not able to travel the distance then find a charging station to charge upto 90% ---
             # This logic is integrated as part of the `charging_stop_required_now` check.
@@ -410,7 +408,10 @@ async def optimize_ev_route(
                     current_soc_kwh += charge_amount_kwh
                     current_soc_percent = (current_soc_kwh / battery_capacity_kwh) * 100
                     
-                    print(f"DEBUG: Charged {charge_amount_kwh:.2f} kWh in {charge_duration_minutes:.1f} minutes. New SOC: {current_soc_percent:.1f}% (Target {charge_target_percent_for_stop:.1f}%)")
+                    if charge_amount_kwh > 0.01:
+                        charging_locations_coords.append(current_position)
+                        #print(f"DEBUG: Charging stop added at {current_position.lat:.4f},{current_position.lon:.4f}")
+                    #print(f"DEBUG: Charged {charge_amount_kwh:.2f} kWh in {charge_duration_minutes:.1f} minutes. New SOC: {current_soc_percent:.1f}% (Target {charge_target_percent_for_stop:.1f}%)")
                 else:
                     print("DEBUG: No meaningful charge needed at this point.")
             
@@ -421,6 +422,7 @@ async def optimize_ev_route(
 
 
         final_soc_percent = (current_soc_kwh / battery_capacity_kwh) * 100
+        print(charging_locations_coords)
 
         # --- Step 12: return the data in the form required ---
         summary = RouteSummary(
@@ -437,7 +439,8 @@ async def optimize_ev_route(
             total_distance_km=total_optimized_distance_km,
             total_duration_s=int(total_optimized_duration_s + (total_charging_duration_minutes * 60)),
             route_segments=all_route_segments_parsed,
-            route_geometry=full_route_geometry_coords
+            route_geometry=full_route_geometry_coords,
+            charging_locations_coords=charging_locations_coords
         )
 
         print("Optimization complete. Returning result.")

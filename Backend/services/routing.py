@@ -30,15 +30,15 @@ async def get_detailed_route_from_google(
         "overview_polyline": "true" # Request overview polyline for the whole route
     }
 
-    print(f"DEBUG: Google Directions Request URL: {url}")
-    print(f"DEBUG: Google Directions Request Params: {params}")
+    #print(f"DEBUG: Google Directions Request URL: {url}")
+    #print(f"DEBUG: Google Directions Request Params: {params}")
 
     async with httpx.AsyncClient() as client:
         try:
             response = await client.get(url, params=params, timeout=30.0)
             response.raise_for_status() # Raises HTTPStatusError for 4xx/5xx responses
             data = response.json()
-            print(f"DEBUG: Raw Google Directions Response: {data}")
+            #print(f"DEBUG: Raw Google Directions Response: {data}")
 
             if data.get("status") == "OK":
                 return data
