@@ -422,6 +422,10 @@ async def optimize_ev_route(
 
 
         final_soc_percent = (current_soc_kwh / battery_capacity_kwh) * 100
+
+        charge_coords_for_json = [
+        {"lat": coord.lat, "lon": coord.lon} for coord in charging_locations_coords
+        ]
         print(charging_locations_coords)
 
         # --- Step 12: return the data in the form required ---
@@ -440,7 +444,7 @@ async def optimize_ev_route(
             total_duration_s=int(total_optimized_duration_s + (total_charging_duration_minutes * 60)),
             route_segments=all_route_segments_parsed,
             route_geometry=full_route_geometry_coords,
-            charging_locations_coords=charging_locations_coords
+            charging_locations_coords=charge_coords_for_json 
         )
 
         print("Optimization complete. Returning result.")

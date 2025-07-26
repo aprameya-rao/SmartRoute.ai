@@ -64,7 +64,7 @@ function RouteForm({ onSubmit, loading }) {
           id="destination"
           value={destination}
           onChange={(e) => setDestination(e.target.value)}
-          placeholder="e.g., Chennai"
+          placeholder="e.g., Mumbai"
           required
         />
       </div>

@@ -32,6 +32,7 @@ class RouteDetails(BaseModel):
     total_duration_s: int
     route_segments: List[RouteStep]
     route_geometry: List[Coordinate]
+    charging_locations_coords: Optional[List[Dict[str, float]]] = None
 
 # Define RouteSummary with camelCase fields for consistent API output (Pydantic validation fix)
 class RouteSummary(BaseModel):
